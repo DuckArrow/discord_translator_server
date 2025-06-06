@@ -346,11 +346,10 @@ async def join(ctx):
 
     # WaveSinkを使用して録音開始
     sink = discord.sinks.WaveSink()
-    # 修正: bot.loop.call_soon_threadsafe を使用してメインスレッドでコールバックをスケジュール
-    #       asyncio.create_task の呼び出しは call_soon_threadsafe の内部で行われるようにする
+    # 修正: コールバック関数がコルーチンオブジェクトを直接返すように変更
     vc.start_recording(
         sink,
-        lambda s: bot.loop.call_soon_threadsafe(once_done, s, ctx.channel),
+        lambda s: once_done(s, ctx.channel),
     )
     vc.is_currently_recording = True # 録音開始フラグをTrueに設定
     
