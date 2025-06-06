@@ -307,7 +307,7 @@ async def join(ctx):
     # 既存の接続があれば切断
     if ctx.guild.id in connections:
         old_vc = connections[ctx.guild.id]
-        if old_vc.is_recording(): # 録音中の場合は停止
+        if old_vc.is_listening(): # 修正: is_recording() -> is_listening()
             old_vc.stop_recording()
         await old_vc.disconnect()
         del connections[ctx.guild.id] # 古い接続を削除
@@ -325,15 +325,6 @@ async def join(ctx):
     if not voice_processor.stt_handler or voice_processor.stt_handler.whisper_model is None:
         await ctx.send("⚠️ Whisperモデルがロードされていません。STT機能は利用できません。Botのログを確認してください。")
         print("Whisperモデルがロードされていないため、STT機能なしで録音を開始します。")
-        # STT機能なしで録音を続行する場合、process_recorded_audio内でSTT呼び出しをスキップする必要がある
-        # (現在の実装はvoice_processor.stt_handler.transcribe_with_local_whisperを呼び出すので、
-        # モデルがNoneだとエラーになる)
-        # 暫定的に、STTなしの場合はvoice_processor.stt_handlerをNoneにする
-        # voice_processor.stt_handler = None # これにより、process_recorded_audio内でSTTをスキップ可能に
-        # もしくは、STTが必須の場合はここで処理を中断
-        # await ctx.send("❌ STT機能なしでは録音を開始できません。")
-        # await vc.disconnect()
-        # return
         pass # STTがNoneでも続行し、process_recorded_audioでスキップする
 
     # WaveSinkを使用して録音開始
@@ -361,7 +352,7 @@ async def stop(ctx):
     
     vc = connections[ctx.guild.id]
     
-    if vc.is_recording():
+    if vc.is_listening(): # 修正: is_recording() -> is_listening()
         vc.stop_recording() # 録音を停止するとonce_doneが呼ばれる
         await ctx.send("🛑 録音を停止しました。音声処理を開始します...")
         print("音声録音を停止しました。")
@@ -377,7 +368,7 @@ async def leave(ctx):
     
     vc = connections[ctx.guild.id]
     
-    if vc.is_recording(): # 録音中なら停止
+    if vc.is_listening(): # 修正: is_recording() -> is_listening()
         vc.stop_recording()
         await ctx.send("🛑 録音を停止してボイスチャンネルから切断します...")
     
@@ -402,7 +393,7 @@ async def status(ctx):
         return
     
     vc = connections[ctx.guild.id]
-    if vc.is_recording():
+    if vc.is_listening(): # 修正: is_recording() -> is_listening()
         channel_members = len(vc.channel.members) - 1  # Bot自身を除く
         await ctx.send(f"📊 録音中です。チャンネル内のメンバー数: {channel_members}人。")
     else:
