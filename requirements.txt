@@ -5,6 +5,7 @@ attrs==25.3.0
 certifi==2025.4.26
 cffi==1.17.1
 charset-normalizer==3.4.2
+discord-ext-voice-recv==0.4.2a145
 discord.py==2.5.2
 frozenlist==1.6.2
 idna==3.10
