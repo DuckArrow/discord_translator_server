@@ -1,6 +1,6 @@
 # ... (既存のインポートと初期設定) ...
 # from discord.ext import commands <- これに加え
-from discord_ext_voice_recv import VoiceRecvClient # 新しくインポート
+from discord.ext.voice_recv import VoiceRecvClient # 正しいインポート方法
 
 # ... (既存のクラス定義やグローバル変数) ...
 
@@ -85,6 +85,13 @@ class RealtimeVoiceDataProcessor:
             print(f"❌ {username} の音声転写に失敗しました (空またはNone)")
         print(f"--- 音声処理完了: {username} ---")
 
+    def identify_speaker(self, user_id: int, username: str) -> Dict:
+        """話者情報を取得する（元のコードから流用）"""
+        return {
+            'user_id': user_id,
+            'username': username,
+            'display_name': username  # 簡単のため同じ値を設定
+        }
 
     async def save_temp_audio_file(self, pcm_data: bytes, user_id: int, username: str) -> Optional[str]:
         """PCMデータをWAV形式で一時ファイルに保存 (既存関数を流用)"""
@@ -123,11 +130,11 @@ class RealtimeVoiceDataProcessor:
 # グローバルな音声データプロセッサを更新
 realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
 
-# ユーザーが話しているかをリアルタイムで検知し、音声データをバッファリングするリスナー
+# discord-ext-voice-recvのイベントリスナーを追加
 @bot.event
-async def on_voice_receive(user: discord.Member, chunk: bytes):
+async def on_voice_receive(sink, user: discord.Member, audio):
     """
-    discord-ext-voice-recv からリアルタイムで音声チャンクを受信
+    discord-ext-voice-recv からリアルタイムで音声データを受信
     """
     if user.bot: # ボット自身の音声は無視
         return
@@ -141,8 +148,8 @@ async def on_voice_receive(user: discord.Member, chunk: bytes):
         if user_id not in realtime_audio_buffers[guild_id]:
             realtime_audio_buffers[guild_id][user_id] = bytearray()
         
-        # 音声チャンクをバッファに追加
-        realtime_audio_buffers[guild_id][user_id].extend(chunk)
+        # 音声データをバッファに追加
+        realtime_audio_buffers[guild_id][user_id].extend(audio.packet.decrypted_data)
 
 @bot.event
 async def on_voice_member_speaking_start(member: discord.Member):
@@ -200,8 +207,7 @@ async def join(ctx):
         await asyncio.sleep(0.5)
 
     # VoiceRecvClient を使用して接続
-    # listen=True で音声データを受信可能にする
-    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True, listen=True)
+    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True)
     connections[ctx.guild.id] = vc
     vc.is_currently_recording = True # 録音開始フラグをTrueに設定
 
