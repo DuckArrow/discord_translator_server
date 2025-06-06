@@ -8,7 +8,7 @@ import wave # WAVファイル書き込み用
 
 # discord-ext-voice-recv から VoiceRecvClient と AudioSink をインポート
 from discord.ext import voice_recv
-
+    
 load_dotenv()
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
@@ -18,7 +18,7 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-# ボットの初期化時に VoiceRecvClient を使うように指定
+# ボットの初期化時に VoiceRecvClient を使うように指定 (connect時に指定するのでここでは不要)
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # 音声データ保存用のディレクトリ
@@ -52,17 +52,27 @@ async def hello(ctx):
 # discord.ext.voice_recv.AudioSink を継承する
 class CustomVoiceRecorder(voice_recv.AudioSink):
     def __init__(self, output_dir: str):
+        super().__init__() # 親クラスの__init__を呼び出す
         self.output_dir = output_dir
         self.users_audio_streams = {} # user_id -> wave.Wave_write object
         self.start_time = int(time.time())
 
+    # --- ここに wants_opus メソッドを追加します！ ---
+    def wants_opus(self) -> bool:
+        """
+        シンクがOPUSデータを受け取りたい場合はTrue、PCMデータを受け取りたい場合はFalseを返します。
+        WAVファイルに書き込むため、デコードされたPCMデータ（False）を要求します。
+        """
+        return False
+    # ----------------------------------------------------
+
     # voice_recv.AudioSink の write メソッドは、PCM データと user オブジェクトを受け取る
-    def write(self, data, user):
+    def write(self, data: bytes, user: discord.User | discord.Member | None): # 型ヒントも追加
         user_id = user.id
         if user_id not in self.users_audio_streams:
             file_name = f"{user_id}_{user.display_name}_{self.start_time}.wav"
             file_path = os.path.join(self.output_dir, file_name)
-
+            
             wf = wave.open(file_path, 'wb')
             # Discordの音声データはPCM、48kHz、ステレオ（2チャンネル）、16bitです
             wf.setnchannels(2) # ステレオ
@@ -102,7 +112,7 @@ async def join(ctx):
         await asyncio.sleep(0.5)
 
     voice_channel = ctx.author.voice.channel
-
+    
     # connect メソッドの cls 引数に voice_recv.VoiceRecvClient を渡す
     vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
     await ctx.send(f'ボイスチャンネル **{voice_channel.name}** に接続しました！')
@@ -113,10 +123,10 @@ async def join(ctx):
 
     # voice_recv.VoiceRecvClient の listen() メソッドを使用
     vc.listen(recorder)
-
+    
     # recorderインスタンスへの参照を保持 (stop_recordやleaveでcleanupを呼ぶため)
     vc.recorder_instance = recorder 
-
+    
     await ctx.send(f"ボイスチャンネルの各ユーザーの音声録音を開始しました。ファイルは`{AUDIO_OUTPUT_DIR}`に保存されます。")
     print(f"各ユーザーの音声録音開始: ターゲットディレクトリ `{AUDIO_OUTPUT_DIR}`")
 
