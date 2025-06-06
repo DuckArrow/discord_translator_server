@@ -16,9 +16,9 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# ★★★ 修正箇所: AudioPacketのインポートを削除 ★★★
+# AudioPacketのインポートは不要
 # from discord.ext.voice_recv.sinks import AudioPacket
-# ★★★ 修正ここまで ★★★
+
 
 # .env ファイルから環境変数をロード
 load_dotenv()
@@ -153,7 +153,6 @@ class RealtimeVoiceDataProcessor:
             if pcm_data:
                 # 非同期タスクとして音声処理を実行
                 # voice_channel_idは connections[guild_id].channel.id から取得可能
-                voice_channel_id = connections[guild_id].channel.id
                 # テキストチャンネルはギルドのデフォルトチャンネル、またはBotがアクセス可能な任意のチャンネル
                 # 例: ctx.channel をどこかから渡すか、bot.get_channel(channel_id) で取得
                 # ここでは簡易的に、ボイスチャンネルのあるギルドの任意のテキストチャンネルを取得する
@@ -261,9 +260,8 @@ class RealtimeVoiceDataProcessor:
 realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
 
 # discord-ext-voice-recvのイベントリスナーを追加
-# ★★★ 修正箇所: on_voice_receiveのシグネチャを修正 ★★★
 @bot.event
-async def on_voice_receive(user: discord.Member, pcm_chunk: bytes): # audio から pcm_chunk に変更し、型ヒントを bytes に
+async def on_voice_receive(user: discord.Member, pcm_chunk: bytes):
     """
     discord-ext-voice-recv からリアルタイムで音声データを受信
     注意: このイベントは音声チャンクが送られてくるたびに呼ばれる
@@ -283,7 +281,6 @@ async def on_voice_receive(user: discord.Member, pcm_chunk: bytes): # audio か�
         
         # 音声データをバッファに追加 (pcm_chunkは生のPCMバイトデータ)
         realtime_audio_buffers[guild_id][user.id].extend(pcm_chunk)
-# ★★★ 修正ここまで ★★★
 
 @bot.event
 async def on_voice_member_speaking_start(member: discord.Member):
@@ -342,8 +339,8 @@ async def join(ctx):
         await asyncio.sleep(0.5) # 切断処理が完全に終わるのを待つ
 
     # VoiceRecvClient を使用して接続
-    # cls=VoiceRecvClient を指定し、listen=True で音声データを受信可能にする
-    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True, listen=True)
+    # cls=VoiceRecvClient を指定。listen=True は不要。
+    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True) # ★★★ 修正箇所: listen=True を削除 ★★★
     connections[ctx.guild.id] = vc
     vc.is_currently_recording = True # 録音開始フラグをTrueに設定
 
