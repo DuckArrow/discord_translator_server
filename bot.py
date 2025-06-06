@@ -244,13 +244,27 @@ voice_processor = VoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None)
 
 async def once_done(sink: discord.sinks.WaveSink, channel: discord.TextChannel, *args):
     """録音完了時のコールバック関数"""
+    # イベントループが閉じている場合は処理をスキップ
+    if bot.loop.is_closed():
+        print("警告: イベントループが閉じているため、録音完了後の処理をスキップします。")
+        return
+    
     print("🛑 録音が完了しました。音声処理を開始します...")
     # 録音されたデータを処理する
     # voice_processor はグローバルで定義されており、on_readyでSTTハンドラーが更新される
     await voice_processor.process_recorded_audio(sink, channel)
+    
+    # 録音終了時、VoiceClientの recording_state を False に設定
+    # ギルドIDを使ってconnectionsからVoiceClientを取得
+    vc = connections.get(channel.guild.id)
+    if vc:
+        vc.is_currently_recording = False # 録音状態フラグをリセット
+
     # 接続をconnectionsから削除（ギルドが切断されたときも考慮）
     if channel.guild.id in connections:
-        del connections[channel.guild.id]
+        # vc.disconnect() は leave コマンドで実行されるべきなので、ここでは行わない
+        # ただし、Botが切断されない限りconnectionsに残しておくのが適切
+        pass # connectionsからの削除は leave コマンドに任せる
 
 
 @bot.event
@@ -307,8 +321,10 @@ async def join(ctx):
     # 既存の接続があれば切断
     if ctx.guild.id in connections:
         old_vc = connections[ctx.guild.id]
-        if old_vc.is_listening(): # 修正: is_recording() -> is_listening()
+        # 録音中の場合は停止 (カスタムフラグを使用)
+        if hasattr(old_vc, 'is_currently_recording') and old_vc.is_currently_recording:
             old_vc.stop_recording()
+            old_vc.is_currently_recording = False # フラグをリセット
         await old_vc.disconnect()
         del connections[ctx.guild.id] # 古い接続を削除
         await asyncio.sleep(0.5)
@@ -316,6 +332,7 @@ async def join(ctx):
     # ボイスチャンネルに接続
     vc = await voice_channel.connect()
     connections[ctx.guild.id] = vc # 新しい接続を記録
+    vc.is_currently_recording = False # 初期状態をFalseに設定
     
     await ctx.send(f'🎵 ボイスチャンネル **{voice_channel.name}** に接続しました！')
     print(f'Botがボイスチャンネル {voice_channel.name} に接続しました。')
@@ -330,10 +347,12 @@ async def join(ctx):
     # WaveSinkを使用して録音開始
     sink = discord.sinks.WaveSink()
     # 修正: bot.loop.call_soon_threadsafe を使用してメインスレッドでコールバックをスケジュール
+    #       asyncio.create_task の呼び出しは call_soon_threadsafe の内部で行われるようにする
     vc.start_recording(
         sink,
-        lambda s: bot.loop.call_soon_threadsafe(asyncio.create_task, once_done(s, ctx.channel)),
+        lambda s: bot.loop.call_soon_threadsafe(once_done, s, ctx.channel),
     )
+    vc.is_currently_recording = True # 録音開始フラグをTrueに設定
     
     await ctx.send(
         f"🎙️ **音声録音・転写を開始しました！**\n"
@@ -352,8 +371,10 @@ async def stop(ctx):
     
     vc = connections[ctx.guild.id]
     
-    if vc.is_listening(): # 修正: is_recording() -> is_listening()
+    # カスタムフラグで録音中か確認
+    if hasattr(vc, 'is_currently_recording') and vc.is_currently_recording:
         vc.stop_recording() # 録音を停止するとonce_doneが呼ばれる
+        # once_doneで is_currently_recording がFalseに設定される
         await ctx.send("🛑 録音を停止しました。音声処理を開始します...")
         print("音声録音を停止しました。")
     else:
@@ -368,8 +389,10 @@ async def leave(ctx):
     
     vc = connections[ctx.guild.id]
     
-    if vc.is_listening(): # 修正: is_recording() -> is_listening()
+    # 録音中なら停止 (カスタムフラグを使用)
+    if hasattr(vc, 'is_currently_recording') and vc.is_currently_recording:
         vc.stop_recording()
+        vc.is_currently_recording = False # フラグをリセット
         await ctx.send("🛑 録音を停止してボイスチャンネルから切断します...")
     
     await vc.disconnect()
@@ -393,7 +416,8 @@ async def status(ctx):
         return
     
     vc = connections[ctx.guild.id]
-    if vc.is_listening(): # 修正: is_recording() -> is_listening()
+    # カスタムフラグで録音中か確認
+    if hasattr(vc, 'is_currently_recording') and vc.is_currently_recording:
         channel_members = len(vc.channel.members) - 1  # Bot自身を除く
         await ctx.send(f"📊 録音中です。チャンネル内のメンバー数: {channel_members}人。")
     else:
