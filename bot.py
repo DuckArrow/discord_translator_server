@@ -6,23 +6,23 @@ import asyncio
 import time
 import wave
 import io
-import aiohttp
 import json
 from typing import Optional, Dict, Any
 import tempfile # 一時ファイル作成・管理用
+
+# faster-whisperのインポート
+from faster_whisper import WhisperModel
 
 # .env ファイルから環境変数をロード
 load_dotenv()
 
 # 各種トークン・APIキーを取得
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Whisper API用
-# Google Cloud STT APIキーは、必要に応じてSpeechToTextHandlerクラス内で使用
+# OpenAI API キーはローカルWhisperでは不要になります
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") 
 GOOGLE_CLOUD_API_KEY = os.getenv("GOOGLE_CLOUD_API_KEY") # 現在は未使用
 
 # Botのインテントを設定
-# Pycordでは、voice_statesとmembersインテントは特権インテントなので、
-# Developer Portalで有効にする必要があります (既に設定済みのはずです)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
@@ -40,57 +40,56 @@ user_voice_profiles: Dict[int, Dict[str, Any]] = {}
 # ギルドごとのボイス接続を管理
 connections: Dict[int, discord.VoiceClient] = {}
 
+# faster-whisper モデルのグローバル変数
+# Bot起動時に一度だけロード
+# モデルサイズを選択 (tiny, base, small, medium, large)
+# device="cpu" を指定することでCPUを使用。GPUがある場合は device="cuda"
+# compute_type="int8" はより少ないメモリと高速な推論を提供しますが、精度に影響する場合があります。
+# より高い精度が必要な場合は "float16" や "float32" を試してください。
+WHISPER_MODEL: Optional[WhisperModel] = None
+WHISPER_MODEL_SIZE = "base" # 推奨: "base" または "small"
+WHISPER_DEVICE = "cpu" # GPUがある場合は "cuda" を試す
+WHISPER_COMPUTE_TYPE = "int8" # CPUの場合は "int8" が効率的
+
+
 class SpeechToTextHandler:
-    """Speech to Text API呼び出しを管理するクラス"""
+    """Speech to Text (STT) 呼び出しを管理するクラス"""
     
-    @staticmethod
-    async def transcribe_with_whisper(audio_file_path: str, unique_id: str) -> Optional[str]:
-        """OpenAI Whisper APIを使用して音声をテキストに変換"""
-        if not OPENAI_API_KEY:
-            print("OpenAI API キーが設定されていません")
+    def __init__(self, whisper_model: WhisperModel):
+        self.whisper_model = whisper_model
+
+    async def transcribe_with_local_whisper(self, audio_file_path: str) -> Optional[str]:
+        """faster-whisper を使用してローカルで音声をテキストに変換"""
+        if self.whisper_model is None:
+            print("Whisper モデルがロードされていません。")
             return None
         
         try:
-            async with aiohttp.ClientSession() as session:
-                with open(audio_file_path, 'rb') as audio_file:
-                    data = aiohttp.FormData()
-                    # Whisper APIは通常、シンプルなwavファイルを推奨
-                    data.add_field('file', audio_file, filename=f"audio_{unique_id}.wav", content_type='audio/wav')
-                    data.add_field('model', 'whisper-1')
-                    data.add_field('language', 'ja')  # 日本語指定
-                    
-                    headers = {
-                        'Authorization': f'Bearer {OPENAI_API_KEY}'
-                    }
-                    
-                    async with session.post(
-                        'https://api.openai.com/v1/audio/transcriptions',
-                        data=data,
-                        headers=headers
-                    ) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            return result.get('text', '')
-                        else:
-                            response_text = await response.text() # エラーレスポンスを詳しく表示
-                            print(f"Whisper API エラー: ステータス {response.status}, レスポンス: {response_text}")
-                            return None
-        except aiohttp.ClientError as e:
-            print(f"HTTPクライアントエラー (Whisper API): {e}")
-            return None
-        except json.JSONDecodeError as e:
-            print(f"JSONデコードエラー (Whisper APIレスポンス): {e}")
-            return None
+            # faster-whisperで音声を転写
+            # language='ja' で日本語を指定、vad_filter=True で無音部分をフィルタリング
+            segments, info = self.whisper_model.transcribe(
+                audio_file_path, 
+                language="ja", 
+                beam_size=5, # 推論のビームサイズ
+                vad_filter=True # 無音部分のフィルタリングを有効にする
+            )
+            
+            transcription_text = []
+            for segment in segments:
+                transcription_text.append(segment.text)
+            
+            return "".join(transcription_text)
+
         except FileNotFoundError:
             print(f"一時音声ファイルが見つかりません: {audio_file_path}")
             return None
         except Exception as e:
-            print(f"音声転写エラー (Whisper API): {e}")
+            print(f"ローカルWhisper音声転写エラー: {e}")
             return None
 
     @staticmethod
     async def transcribe_with_google(audio_file_path: str, unique_id: str) -> Optional[str]:
-        """Google Cloud Speech-to-Text APIを使用（実装例）"""
+        """Google Cloud Speech-to-Text APIを使用（未実装）"""
         # Google Cloud STT APIの実装は別途必要です。
         # 実際の実装はGoogle Cloud SDKを使用することを推奨
         print("Google Cloud STT APIは現在実装されていません。")
@@ -99,9 +98,9 @@ class SpeechToTextHandler:
 class VoiceDataProcessor:
     """音声データ処理とSTT処理を管理するクラス"""
     
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, stt_handler: SpeechToTextHandler):
         self.output_dir = output_dir
-        self.stt_handler = SpeechToTextHandler()
+        self.stt_handler = stt_handler
         self.start_time = int(time.time())
 
     def identify_speaker(self, user_id: int, user_name: str) -> Dict[str, Any]:
@@ -134,7 +133,8 @@ class VoiceDataProcessor:
                 return
 
             for user_id, audio_data in sink.audio_data.items():
-                user = bot.get_user(user_id) or bot.get_guild(channel.guild.id).get_member(user_id)
+                # bot.get_user はキャッシュに依存するため、get_guild.get_member も試す
+                user = bot.get_user(user_id) or channel.guild.get_member(user_id)
                 if not user:
                     print(f"ユーザーID {user_id} のユーザー情報が取得できませんでした")
                     continue
@@ -149,8 +149,8 @@ class VoiceDataProcessor:
                 temp_audio_path = await self.save_temp_audio_file(audio_data.file.getvalue(), user_id, user.display_name)
                 
                 if temp_audio_path:
-                    # STT処理
-                    transcription = await self.stt_handler.transcribe_with_whisper(temp_audio_path, str(user_id))
+                    # STT処理: faster-whisperはunique_idを必要としないため、引数から削除
+                    transcription = await self.stt_handler.transcribe_with_local_whisper(temp_audio_path)
                     
                     if transcription and transcription.strip():
                         # 結果をリストに追加
@@ -176,12 +176,16 @@ class VoiceDataProcessor:
                 message_parts = []
                 current_message = "--- 全ての転写結果 ---\n"
                 for entry in all_transcriptions:
-                    if len(current_message) + len(entry) + 4 > 2000: # Discordのメッセージ文字数制限 (約2000文字)
-                        await channel.send(current_message)
+                    # Discordのメッセージ文字数制限 (約2000文字) を考慮
+                    if len(current_message) + len(entry) + 4 > 1990: # 少し余裕を持たせる
+                        message_parts.append(current_message)
                         current_message = ""
                     current_message += entry + "\n"
-                if current_message.strip() != "--- 全ての転写結果 ---":
-                    await channel.send(current_message)
+                if current_message.strip() != "--- 全ての転写結果 ---": # 残りのメッセージを追加
+                    message_parts.append(current_message)
+                
+                for msg_part in message_parts:
+                    await channel.send(msg_part)
                 await channel.send("✅ 全ての音声処理が完了しました。")
             else:
                 await channel.send("ℹ️ 処理対象の音声データが見つかりませんでした。")
@@ -233,7 +237,8 @@ class VoiceDataProcessor:
             print(f"転写結果保存エラー: {e}")
 
 # グローバルな音声データプロセッサ
-voice_processor = VoiceDataProcessor(AUDIO_OUTPUT_DIR)
+# STTハンドラーを初期化する際に、ロード済みのWHISPER_MODELを渡す
+voice_processor = VoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(WHISPER_MODEL))
 
 async def once_done(sink: discord.sinks.WaveSink, channel: discord.TextChannel, *args):
     """録音完了時のコールバック関数"""
@@ -250,7 +255,20 @@ async def on_ready():
     """BotがDiscordに接続したときに呼ばれるイベント"""
     print(f'{bot.user} がDiscordに接続しました！')
     print(f'Bot ID: {bot.user.id}')
-    print(f'利用可能なSTT: {"Whisper API" if OPENAI_API_KEY else "なし"}')
+    # Whisperモデルをロード
+    global WHISPER_MODEL
+    try:
+        print(f"Whisperモデル ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE}) をロード中...")
+        WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+        print("Whisperモデルのロードが完了しました。")
+        # モデルがロードされたらSTTハンドラーとVoiceDataProcessorを再初期化
+        voice_processor.stt_handler = SpeechToTextHandler(WHISPER_MODEL)
+    except Exception as e:
+        print(f"Whisperモデルのロードに失敗しました: {e}")
+        WHISPER_MODEL = None # ロード失敗時はNoneにする
+
+    print(f'利用可能なSTT: {"✅ ローカルWhisper" if WHISPER_MODEL else "❌ なし"}')
+
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -297,18 +315,30 @@ async def join(ctx):
     await ctx.send(f'🎵 ボイスチャンネル **{voice_channel.name}** に接続しました！')
     print(f'Botがボイスチャンネル {voice_channel.name} に接続しました。')
 
+    # STTモデルがロードされているか確認
+    if WHISPER_MODEL is None:
+        await ctx.send("⚠️ Whisperモデルがロードされていません。STT機能は利用できません。Botのログを確認してください。")
+        print("Whisperモデルがロードされていないため、STT機能なしで録音を開始します。")
+        # STT機能なしで録音を続ける場合は、once_doneからSTT処理をスキップするようにする
+        # 現状はSTTハンドラーがNoneでないことを前提としているため、エラーになる可能性あり
+        # ここではSTTハンドラーの初期化をjoinコマンド内で行うのではなく、on_readyで行い、
+        # voice_processorに渡すことで一貫性を保つ
+        current_stt_handler = SpeechToTextHandler(WHISPER_MODEL) # モデルがNoneでも渡す
+        current_voice_processor = VoiceDataProcessor(AUDIO_OUTPUT_DIR, current_stt_handler)
+    else:
+        current_voice_processor = voice_processor # グローバルなものを利用
+
     # WaveSinkを使用して録音開始
     sink = discord.sinks.WaveSink()
     vc.start_recording(
         sink,
-        once_done,  # 録音完了時のコールバック
-        ctx.channel # チャンネル情報を渡す (once_doneで使うため)
+        lambda s: asyncio.create_task(once_done(s, ctx.channel)),  # コールバック関数をasyncio.Taskでラップ
     )
     
     await ctx.send(
         f"🎙️ **音声録音・転写を開始しました！**\n"
         f"📁 ファイル保存先: `{AUDIO_OUTPUT_DIR}`\n"
-        f"🤖 STT: {'✅ Whisper API' if OPENAI_API_KEY else '❌ なし'}\n"
+        f"🤖 STT: {'✅ ローカルWhisper' if WHISPER_MODEL else '❌ なし'}\n"
         f"ℹ️ `!stop` で録音を停止できます。"
     )
     print(f"音声録音開始: {AUDIO_OUTPUT_DIR}")
@@ -371,11 +401,11 @@ async def status(ctx):
 
 @bot.command()
 async def test_stt(ctx):
-    """STT APIの接続テスト"""
-    if OPENAI_API_KEY:
-        await ctx.send("✅ Whisper API設定済み - STT機能が利用可能です。")
+    """STT機能の接続テスト"""
+    if WHISPER_MODEL:
+        await ctx.send(f"✅ ローカルWhisperモデル ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE}) 設定済み - STT機能が利用可能です。")
     else:
-        await ctx.send("❌ STT APIキーが設定されていません。")
+        await ctx.send("❌ STT機能が利用できません。Whisperモデルのロードに失敗している可能性があります。")
 
 # Botの実行
 if DISCORD_BOT_TOKEN:
