@@ -16,8 +16,8 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# ★★★ 修正箇所: AudioPacketの正しいインポート ★★★
-from discord.ext.voice_recv.sinks import AudioPacket
+# ★★★ 修正箇所: AudioPacketのインポートを削除 ★★★
+# from discord.ext.voice_recv.sinks import AudioPacket
 # ★★★ 修正ここまで ★★★
 
 # .env ファイルから環境変数をロード
@@ -159,10 +159,12 @@ class RealtimeVoiceDataProcessor:
                 # ここでは簡易的に、ボイスチャンネルのあるギルドの任意のテキストチャンネルを取得する
                 # 本番環境では、ユーザーが設定できる専用のテキストチャンネルを使用すべき
                 text_channel_to_send = None
-                for channel in bot.get_guild(guild_id).text_channels:
-                    if channel.permissions_for(bot.get_guild(guild_id).me).send_messages:
-                        text_channel_to_send = channel
-                        break
+                guild_obj = bot.get_guild(guild_id)
+                if guild_obj:
+                    for channel in guild_obj.text_channels:
+                        if channel.permissions_for(guild_obj.me).send_messages:
+                            text_channel_to_send = channel
+                            break
                 
                 if text_channel_to_send:
                     task = asyncio.create_task(
@@ -259,8 +261,9 @@ class RealtimeVoiceDataProcessor:
 realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
 
 # discord-ext-voice-recvのイベントリスナーを追加
+# ★★★ 修正箇所: on_voice_receiveのシグネチャを修正 ★★★
 @bot.event
-async def on_voice_receive(user: discord.Member, audio: AudioPacket): # ★★★ 修正箇所: 型ヒントを AudioPacket に変更 ★★★
+async def on_voice_receive(user: discord.Member, pcm_chunk: bytes): # audio から pcm_chunk に変更し、型ヒントを bytes に
     """
     discord-ext-voice-recv からリアルタイムで音声データを受信
     注意: このイベントは音声チャンクが送られてくるたびに呼ばれる
@@ -278,8 +281,9 @@ async def on_voice_receive(user: discord.Member, audio: AudioPacket): # ★★�
         if user_id not in realtime_audio_buffers[guild_id]:
             realtime_audio_buffers[guild_id][user.id] = bytearray()
         
-        # 音声データをバッファに追加 (decrypted_dataは生のPCMバイトデータ)
-        realtime_audio_buffers[guild_id][user.id].extend(audio.packet.decrypted_data)
+        # 音声データをバッファに追加 (pcm_chunkは生のPCMバイトデータ)
+        realtime_audio_buffers[guild_id][user.id].extend(pcm_chunk)
+# ★★★ 修正ここまで ★★★
 
 @bot.event
 async def on_voice_member_speaking_start(member: discord.Member):
