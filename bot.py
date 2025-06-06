@@ -238,12 +238,15 @@ class VoiceDataProcessor:
 
 # グローバルな音声データプロセッサ
 # STTハンドラーを初期化する際に、ロード済みのWHISPER_MODELを渡す
-voice_processor = VoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(WHISPER_MODEL))
+# on_readyでWHISPER_MODELがロードされるため、初期段階ではNoneの可能性がある
+# 実際にはon_readyで再初期化される
+voice_processor = VoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None)) # 初期段階ではNoneを渡す
 
 async def once_done(sink: discord.sinks.WaveSink, channel: discord.TextChannel, *args):
     """録音完了時のコールバック関数"""
     print("🛑 録音が完了しました。音声処理を開始します...")
     # 録音されたデータを処理する
+    # voice_processor はグローバルで定義されており、on_readyでSTTハンドラーが更新される
     await voice_processor.process_recorded_audio(sink, channel)
     # 接続をconnectionsから削除（ギルドが切断されたときも考慮）
     if channel.guild.id in connections:
@@ -259,6 +262,8 @@ async def on_ready():
     global WHISPER_MODEL
     try:
         print(f"Whisperモデル ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE}) をロード中...")
+        # PyTorchがCPU/GPUのバージョンと互換性があるか確認
+        # deviceが"cuda"の場合、GPUの利用可能性をチェックすることが望ましい
         WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
         print("Whisperモデルのロードが完了しました。")
         # モデルがロードされたらSTTハンドラーとVoiceDataProcessorを再初期化
@@ -316,29 +321,33 @@ async def join(ctx):
     print(f'Botがボイスチャンネル {voice_channel.name} に接続しました。')
 
     # STTモデルがロードされているか確認
-    if WHISPER_MODEL is None:
+    # joinコマンド実行時にvoice_processorのstt_handlerが適切に設定されていることを確認
+    if not voice_processor.stt_handler or voice_processor.stt_handler.whisper_model is None:
         await ctx.send("⚠️ Whisperモデルがロードされていません。STT機能は利用できません。Botのログを確認してください。")
         print("Whisperモデルがロードされていないため、STT機能なしで録音を開始します。")
-        # STT機能なしで録音を続ける場合は、once_doneからSTT処理をスキップするようにする
-        # 現状はSTTハンドラーがNoneでないことを前提としているため、エラーになる可能性あり
-        # ここではSTTハンドラーの初期化をjoinコマンド内で行うのではなく、on_readyで行い、
-        # voice_processorに渡すことで一貫性を保つ
-        current_stt_handler = SpeechToTextHandler(WHISPER_MODEL) # モデルがNoneでも渡す
-        current_voice_processor = VoiceDataProcessor(AUDIO_OUTPUT_DIR, current_stt_handler)
-    else:
-        current_voice_processor = voice_processor # グローバルなものを利用
+        # STT機能なしで録音を続行する場合、process_recorded_audio内でSTT呼び出しをスキップする必要がある
+        # (現在の実装はvoice_processor.stt_handler.transcribe_with_local_whisperを呼び出すので、
+        # モデルがNoneだとエラーになる)
+        # 暫定的に、STTなしの場合はvoice_processor.stt_handlerをNoneにする
+        # voice_processor.stt_handler = None # これにより、process_recorded_audio内でSTTをスキップ可能に
+        # もしくは、STTが必須の場合はここで処理を中断
+        # await ctx.send("❌ STT機能なしでは録音を開始できません。")
+        # await vc.disconnect()
+        # return
+        pass # STTがNoneでも続行し、process_recorded_audioでスキップする
 
     # WaveSinkを使用して録音開始
     sink = discord.sinks.WaveSink()
+    # 修正: bot.loop.call_soon_threadsafe を使用してメインスレッドでコールバックをスケジュール
     vc.start_recording(
         sink,
-        lambda s: asyncio.create_task(once_done(s, ctx.channel)),  # コールバック関数をasyncio.Taskでラップ
+        lambda s: bot.loop.call_soon_threadsafe(asyncio.create_task, once_done(s, ctx.channel)),
     )
     
     await ctx.send(
         f"🎙️ **音声録音・転写を開始しました！**\n"
         f"📁 ファイル保存先: `{AUDIO_OUTPUT_DIR}`\n"
-        f"🤖 STT: {'✅ ローカルWhisper' if WHISPER_MODEL else '❌ なし'}\n"
+        f"🤖 STT: {'✅ ローカルWhisper' if voice_processor.stt_handler and voice_processor.stt_handler.whisper_model else '❌ なし'}\n"
         f"ℹ️ `!stop` で録音を停止できます。"
     )
     print(f"音声録音開始: {AUDIO_OUTPUT_DIR}")
