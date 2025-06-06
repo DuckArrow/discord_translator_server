@@ -6,6 +6,30 @@ import asyncio
 import time
 import wave # WAVファイル書き込み用
 
+# py-cordのバージョンとsinks機能の確認
+print(f"Discord.py version: {discord.__version__}")
+print(f"Has sinks module: {hasattr(discord, 'sinks')}")
+
+# discord.sinksが存在するか確認し、AudioSinkのインポートを試みる
+try:
+    from discord.sinks import AudioSink
+    print("Successfully imported AudioSink")
+except ImportError as e:
+    print(f"Failed to import AudioSink: {e}")
+    print("Available attributes in discord.sinks:")
+    if hasattr(discord, 'sinks'):
+        print(dir(discord.sinks))
+    else:
+        print("discord.sinks module not found")
+except AttributeError as e: # `discord.sinks` はあるが `AudioSink` がない場合に対応
+    print(f"Failed to access AudioSink: {e}")
+    print("Available attributes in discord.sinks:")
+    if hasattr(discord, 'sinks'):
+        print(dir(discord.sinks))
+    else:
+        print("discord.sinks module not found")
+
+
 # .env ファイルから環境変数をロード
 load_dotenv()
 
@@ -57,66 +81,77 @@ async def hello(ctx):
     """シンプルなテストコマンド"""
     await ctx.send(f'こんにちは、{ctx.author.display_name}さん！')
 
-# 各ユーザーの音声データを個別に処理するためのカスタムシンククラス
-# Pycordの discord.sinks.AudioSink を継承します
-class CustomVoiceRecorder(discord.sinks.AudioSink):
-    """
-    ボイスチャンネルからの各ユーザーの音声データを個別のWAVファイルに保存するカスタムシンク。
-    """
-    def __init__(self, output_dir: str):
-        super().__init__() # discord.sinks.AudioSink のコンストラクタを呼び出す
-        self.output_dir = output_dir
-        self.users_audio_streams = {} # user_id をキーに wave.Wave_write オブジェクトを保存
-        self.start_time = int(time.time()) # 録音開始時のタイムスタンプ (ファイル名用)
+# 修正版: try-except で AudioSink のインポートを処理し、クラス定義
+try:
+    # AudioSinkが正常にインポートされていることを前提にCustomVoiceRecorderを定義
+    class CustomVoiceRecorder(AudioSink): # 直接AudioSinkを使う
+        """
+        ボイスチャンネルからの各ユーザーの音声データを個別のWAVファイルに保存するカスタムシンク。
+        """
+        def __init__(self, output_dir: str):
+            super().__init__() # discord.sinks.AudioSink のコンストラクタを呼び出す
+            self.output_dir = output_dir
+            self.users_audio_streams = {} # user_id をキーに wave.Wave_write オブジェクトを保存
+            self.start_time = int(time.time()) # 録音開始時のタイムスタンプ (ファイル名用)
 
-    def wants_opus(self) -> bool:
-        """
-        PycordのAudioSink抽象メソッド。
-        シンクがOPUSデータを受け取りたい場合はTrue、PCMデータを受け取りたい場合はFalseを返します。
-        WAVファイルはPCMデータで書き込むため、デコードされたPCMデータ（False）を要求します。
-        """
-        return False
+        def wants_opus(self) -> bool:
+            """
+            PycordのAudioSink抽象メソッド。
+            シンクがOPUSデータを受け取りたい場合はTrue、PCMデータを受け取りたい場合はFalseを返します。
+            WAVファイルはPCMデータで書き込むため、デコードされたPCMデータ（False）を要求します。
+            """
+            return False
 
-    def write(self, data: bytes, user: discord.User | discord.Member | None):
-        """
-        各ユーザーの音声データが到着するたびに呼ばれるメソッド。
-        data: デコードされたPCM音声データ (bytes)
-        user: 発言したユーザーの discord.User または discord.Member オブジェクト
-        """
-        user_id = user.id
-        # そのユーザーのファイルがまだ開かれていない場合、新しくWAVファイルを作成
-        if user_id not in self.users_audio_streams:
-            file_name = f"{user_id}_{user.display_name}_{self.start_time}.wav"
-            file_path = os.path.join(self.output_dir, file_name)
-            
-            wf = wave.open(file_path, 'wb')
-            # Discordの音声データはPCM、48kHz、ステレオ（2チャンネル）、16bitです
-            wf.setnchannels(2)    # ステレオ
-            wf.setsampwidth(2)    # 16-bit (2バイト/サンプル)
-            wf.setframerate(48000) # 48kHz
-            self.users_audio_streams[user_id] = wf
-            print(f"録音開始: {user.display_name} ({user_id}) の音声 -> {file_path}")
+        def write(self, data: bytes, user: discord.User | discord.Member | None):
+            """
+            各ユーザーの音声データが到着するたびに呼ばれるメソッド。
+            data: デコードされたPCM音声データ (bytes)
+            user: 発言したユーザーの discord.User または discord.Member オブジェクト
+            """
+            user_id = user.id
+            # そのユーザーのファイルがまだ開かれていない場合、新しくWAVファイルを作成
+            if user_id not in self.users_audio_streams:
+                file_name = f"{user_id}_{user.display_name}_{self.start_time}.wav"
+                file_path = os.path.join(self.output_dir, file_name)
+                
+                wf = wave.open(file_path, 'wb')
+                # Discordの音声データはPCM、48kHz、ステレオ（2チャンネル）、16bitです
+                wf.setnchannels(2)    # ステレオ
+                wf.setsampwidth(2)    # 16-bit (2バイト/サンプル)
+                wf.setframerate(48000) # 48kHz
+                self.users_audio_streams[user_id] = wf
+                print(f"録音開始: {user.display_name} ({user_id}) の音声 -> {file_path}")
 
-        # 音声データをWAVファイルに書き込む
-        self.users_audio_streams[user_id].writeframes(data)
+            # 音声データをWAVファイルに書き込む
+            self.users_audio_streams[user_id].writeframes(data)
 
-    def cleanup(self):
-        """
-        録音が終了したときに呼ばれるクリーンアップメソッド。
-        開いている全てのWAVファイルを閉じます。
-        """
-        print("すべてのユーザーの音声レコーダーをクリーンアップ中...")
-        for user_id, wf in self.users_audio_streams.items():
-            wf.close()
-            print(f"ユーザー {user_id} のWAVファイルを閉じました。")
-        self.users_audio_streams.clear()
+        def cleanup(self):
+            """
+            録音が終了したときに呼ばれるクリーンアップメソッド。
+            開いている全てのWAVファイルを閉じます。
+            """
+            print("すべてのユーザーの音声レコーダーをクリーンアップ中...")
+            for user_id, wf in self.users_audio_streams.items():
+                wf.close()
+                print(f"ユーザー {user_id} のWAVファイルを閉じました。")
+            self.users_audio_streams.clear()
 
+except (ImportError, AttributeError) as e:
+    print(f"Error defining CustomVoiceRecorder: {e}")
+    print("AudioSink not available - voice recording features will be disabled")
+    # CustomVoiceRecorderが定義できない場合、Noneに設定して音声録音機能を無効化
+    CustomVoiceRecorder = None
 
 @bot.command()
 async def join(ctx):
     """
     ボットをユーザーと同じボイスチャンネルに接続し、音声録音を開始するコマンド。
     """
+    # CustomVoiceRecorderが利用可能か確認
+    if CustomVoiceRecorder is None:
+        await ctx.send("音声録音機能が利用できません。Pycordのインストールを確認してください。")
+        return
+        
     # コマンドを実行したユーザーがボイスチャンネルにいるか確認
     if ctx.author.voice is None:
         await ctx.send("ボイスチャンネルに接続してください。")
