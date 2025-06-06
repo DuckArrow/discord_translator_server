@@ -9,15 +9,16 @@ import io
 import json
 import tempfile # 一時ファイル作成・管理用
 
-# ★★★ 修正箇所: typingモジュールのインポートをファイルの先頭へ移動 ★★★
 from typing import Optional, Dict, Any
-# ★★★ 修正ここまで ★★★
 
 # faster-whisperのインポート
 from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
+# ★★★ 修正箇所: AudioPacketの正しいインポート ★★★
+from discord.ext.voice_recv.sinks import AudioPacket
+# ★★★ 修正ここまで ★★★
 
 # .env ファイルから環境変数をロード
 load_dotenv()
@@ -259,7 +260,7 @@ realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechTo
 
 # discord-ext-voice-recvのイベントリスナーを追加
 @bot.event
-async def on_voice_receive(user: discord.Member, audio: VoiceRecvClient.AudioPacket):
+async def on_voice_receive(user: discord.Member, audio: AudioPacket): # ★★★ 修正箇所: 型ヒントを AudioPacket に変更 ★★★
     """
     discord-ext-voice-recv からリアルタイムで音声データを受信
     注意: このイベントは音声チャンクが送られてくるたびに呼ばれる
@@ -275,10 +276,10 @@ async def on_voice_receive(user: discord.Member, audio: VoiceRecvClient.AudioPac
         if guild_id not in realtime_audio_buffers:
             realtime_audio_buffers[guild_id] = {}
         if user_id not in realtime_audio_buffers[guild_id]:
-            realtime_audio_buffers[guild_id][user_id] = bytearray()
+            realtime_audio_buffers[guild_id][user.id] = bytearray()
         
         # 音声データをバッファに追加 (decrypted_dataは生のPCMバイトデータ)
-        realtime_audio_buffers[guild_id][user_id].extend(audio.packet.decrypted_data)
+        realtime_audio_buffers[guild_id][user.id].extend(audio.packet.decrypted_data)
 
 @bot.event
 async def on_voice_member_speaking_start(member: discord.Member):
