@@ -1,6 +1,7 @@
 import os
 import discord
 from discord.ext import commands
+from discord.sinks import Sink # 修正: Sinkをインポート
 from dotenv import load_dotenv
 import asyncio
 import time
@@ -12,6 +13,8 @@ print(f"Has sinks module: {hasattr(discord, 'sinks')}")
 
 # discord.sinksが存在するか確認し、AudioSinkのインポートを試みる
 try:
+    # AudioSinkが正常にインポートできるか試す
+    # (CustomVoiceRecorderがAudioSinkを継承する場合に必要)
     from discord.sinks import AudioSink
     print("Successfully imported AudioSink")
 except ImportError as e:
@@ -81,77 +84,71 @@ async def hello(ctx):
     """シンプルなテストコマンド"""
     await ctx.send(f'こんにちは、{ctx.author.display_name}さん！')
 
-# 修正版: try-except で AudioSink のインポートを処理し、クラス定義
-try:
-    # AudioSinkが正常にインポートされていることを前提にCustomVoiceRecorderを定義
-    class CustomVoiceRecorder(AudioSink): # 直接AudioSinkを使う
+# 各ユーザーの音声データを個別に処理するためのカスタムシンククラス
+# 修正: discord.sinks.Sink を継承します
+# 注意: Sinkを継承すると、writeメソッドにuserオブジェクトが渡されなくなるため、
+#      話者ごとの分離はできません。ボイスチャンネル全体の音声がまとめて録音されます。
+class CustomVoiceRecorder(Sink):
+    """
+    ボイスチャンネル全体の音声データをWAVファイルに保存するカスタムシンク。
+    注意: このクラスはPycordのdiscord.sinks.Sinkを継承しているため、
+          各話者の音声を個別に分離して録音することはできません。
+          ボイスチャンネル内の全ユーザーの音声がミキシングされて録音されます。
+    """
+    def __init__(self, output_dir: str):
+        super().__init__() # discord.sinks.Sink のコンストラクタを呼び出す
+        self.output_dir = output_dir
+        # 単一ファイルに保存するため、辞書ではなく直接ファイルオブジェクトを保持
+        self.output_file = None 
+        self.start_time = int(time.time()) # 録音開始時のタイムスタンプ (ファイル名用)
+
+    def wants_opus(self) -> bool:
         """
-        ボイスチャンネルからの各ユーザーの音声データを個別のWAVファイルに保存するカスタムシンク。
+        PycordのAudioSink抽象メソッド。
+        Sinkには直接このメソッドは存在しませんが、互換性のため残しています。
+        Trueを返すとOPUSデータ、FalseだとPCMデータを受け取ります。
+        ここではPCMデータを要求します。
         """
-        def __init__(self, output_dir: str):
-            super().__init__() # discord.sinks.AudioSink のコンストラクタを呼び出す
-            self.output_dir = output_dir
-            self.users_audio_streams = {} # user_id をキーに wave.Wave_write オブジェクトを保存
-            self.start_time = int(time.time()) # 録音開始時のタイムスタンプ (ファイル名用)
+        return False # PCMデータを要求
 
-        def wants_opus(self) -> bool:
-            """
-            PycordのAudioSink抽象メソッド。
-            シンクがOPUSデータを受け取りたい場合はTrue、PCMデータを受け取りたい場合はFalseを返します。
-            WAVファイルはPCMデータで書き込むため、デコードされたPCMデータ（False）を要求します。
-            """
-            return False
+    # 修正: Sinkのwriteメソッドのシグネチャに合わせてuser引数を削除
+    def write(self, data: bytes):
+        """
+        ボイスチャンネル全体の音声データが到着するたびに呼ばれるメソッド。
+        data: デコードされたPCM音声データ (bytes)
+        注意: Sinkを継承しているため、userオブジェクトはここには渡されません。
+        """
+        if self.output_file is None:
+            # ファイルがまだ開かれていない場合、新しくWAVファイルを作成
+            file_name = f"mixed_audio_{self.start_time}.wav" # 全員分の音声なのでファイル名を変更
+            file_path = os.path.join(self.output_dir, file_name)
+            
+            self.output_file = wave.open(file_path, 'wb')
+            # Discordの音声データはPCM、48kHz、ステレオ（2チャンネル）、16bitです
+            self.output_file.setnchannels(2)    # ステレオ
+            self.output_file.setsampwidth(2)    # 16-bit (2バイト/サンプル)
+            self.output_file.setframerate(48000) # 48kHz
+            print(f"録音開始: ボイスチャンネル全体の音声 -> {file_path}")
 
-        def write(self, data: bytes, user: discord.User | discord.Member | None):
-            """
-            各ユーザーの音声データが到着するたびに呼ばれるメソッド。
-            data: デコードされたPCM音声データ (bytes)
-            user: 発言したユーザーの discord.User または discord.Member オブジェクト
-            """
-            user_id = user.id
-            # そのユーザーのファイルがまだ開かれていない場合、新しくWAVファイルを作成
-            if user_id not in self.users_audio_streams:
-                file_name = f"{user_id}_{user.display_name}_{self.start_time}.wav"
-                file_path = os.path.join(self.output_dir, file_name)
-                
-                wf = wave.open(file_path, 'wb')
-                # Discordの音声データはPCM、48kHz、ステレオ（2チャンネル）、16bitです
-                wf.setnchannels(2)    # ステレオ
-                wf.setsampwidth(2)    # 16-bit (2バイト/サンプル)
-                wf.setframerate(48000) # 48kHz
-                self.users_audio_streams[user_id] = wf
-                print(f"録音開始: {user.display_name} ({user_id}) の音声 -> {file_path}")
+        # 音声データをWAVファイルに書き込む
+        self.output_file.writeframes(data)
 
-            # 音声データをWAVファイルに書き込む
-            self.users_audio_streams[user_id].writeframes(data)
+    def cleanup(self):
+        """
+        録音が終了したときに呼ばれるクリーンアップメソッド。
+        開いているWAVファイルを閉じます。
+        """
+        if self.output_file:
+            self.output_file.close()
+            print("録音ファイル閉じました。")
+            self.output_file = None
 
-        def cleanup(self):
-            """
-            録音が終了したときに呼ばれるクリーンアップメソッド。
-            開いている全てのWAVファイルを閉じます。
-            """
-            print("すべてのユーザーの音声レコーダーをクリーンアップ中...")
-            for user_id, wf in self.users_audio_streams.items():
-                wf.close()
-                print(f"ユーザー {user_id} のWAVファイルを閉じました。")
-            self.users_audio_streams.clear()
-
-except (ImportError, AttributeError) as e:
-    print(f"Error defining CustomVoiceRecorder: {e}")
-    print("AudioSink not available - voice recording features will be disabled")
-    # CustomVoiceRecorderが定義できない場合、Noneに設定して音声録音機能を無効化
-    CustomVoiceRecorder = None
 
 @bot.command()
 async def join(ctx):
     """
     ボットをユーザーと同じボイスチャンネルに接続し、音声録音を開始するコマンド。
     """
-    # CustomVoiceRecorderが利用可能か確認
-    if CustomVoiceRecorder is None:
-        await ctx.send("音声録音機能が利用できません。Pycordのインストールを確認してください。")
-        return
-        
     # コマンドを実行したユーザーがボイスチャンネルにいるか確認
     if ctx.author.voice is None:
         await ctx.send("ボイスチャンネルに接続してください。")
@@ -188,8 +185,8 @@ async def join(ctx):
     # recorderインスタンスへの参照をVCオブジェクトに保持 (停止や切断時にcleanupを呼ぶため)
     vc.recorder_instance = recorder 
     
-    await ctx.send(f"ボイスチャンネルの各ユーザーの音声録音を開始しました。ファイルは`{AUDIO_OUTPUT_DIR}`に保存されます。")
-    print(f"各ユーザーの音声録音開始: ターゲットディレクトリ `{AUDIO_OUTPUT_DIR}`")
+    await ctx.send(f"ボイスチャンネル全体の音声録音を開始しました。ファイルは`{AUDIO_OUTPUT_DIR}`に保存されます。")
+    print(f"ボイスチャンネル全体の音声録音開始: ターゲットディレクトリ `{AUDIO_OUTPUT_DIR}`")
 
 
 @bot.command()
