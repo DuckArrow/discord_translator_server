@@ -17,7 +17,6 @@ from faster_whisper import WhisperModel
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
 # AudioPacketのインポートは不要なので削除
-# from discord.ext.voice_recv.sinks import AudioPacket
 
 
 # .env ファイルから環境変数をロード
@@ -263,7 +262,7 @@ realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechTo
 
 # discord-ext-voice-recvのイベントリスナーを追加
 @bot.event
-async def on_voice_receive(user: discord.Member, audio_data): # ★★★ 修正箇所: audio_data を受け取るように変更 ★★★
+async def on_voice_receive(user: discord.Member, audio_data):
     """
     discord-ext-voice-recv からリアルタイムで音声データを受信
     audio_data は VoiceRecvClient.AudioPacket オブジェクトであると想定
@@ -349,12 +348,13 @@ async def join(ctx):
     connections[ctx.guild.id] = vc
     vc.is_currently_recording = True # 録音開始フラグをTrueに設定
 
-    # 音声受信を明示的に開始
-    try:
-        await vc.start_receiving() # VoiceRecvClientのstart_receiving()を呼び出す
-        print("🔊 VoiceRecvClient started explicit receiving.")
-    except Exception as e:
-        print(f"❌ Error starting explicit receiving: {e}")
+    # ★★★ 修正箇所: start_receiving() の呼び出しを削除 ★★★
+    # try:
+    #     await vc.start_receiving() # VoiceRecvClientのstart_receiving()を呼び出す
+    #     print("🔊 VoiceRecvClient started explicit receiving.")
+    # except Exception as e:
+    #     print(f"❌ Error starting explicit receiving: {e}")
+    # ★★★ 修正ここまで ★★★
 
     await ctx.send(f'🎵 ボイスチャンネル **{voice_channel.name}** に接続しました！')
     print(f'Botがボイスチャンネル {voice_channel.name} に接続しました。')
