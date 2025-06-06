@@ -16,7 +16,7 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# AudioPacketのインポートは不要
+# AudioPacketのインポートは不要なので削除
 # from discord.ext.voice_recv.sinks import AudioPacket
 
 
@@ -166,6 +166,7 @@ class RealtimeVoiceDataProcessor:
                             break
                 
                 if text_channel_to_send:
+                    print(f"DEBUG: Processing audio for {user.display_name} (length: {len(pcm_data)} bytes)") # デバッグ用ログ
                     task = asyncio.create_task(
                         self.process_single_user_audio(
                             pcm_data,
@@ -178,7 +179,7 @@ class RealtimeVoiceDataProcessor:
                         transcription_tasks[guild_id] = {}
                     transcription_tasks[guild_id][user.id] = task
                 else:
-                    print(f"⚠️ ギルド {guild_id} でテキストチャンネルが見つかりませんでした。")
+                    print(f"⚠️ ギルド {guild_id} でテキストチャンネルが見つかりませんでした。メッセージを送信できません。")
             else:
                 print(f"⚠️ {user.display_name} の音声データが空でした。")
         else:
@@ -209,6 +210,7 @@ class RealtimeVoiceDataProcessor:
         if transcription and transcription.strip():
             await text_channel.send(f"**{username}**: {transcription}")
             await self.save_transcription(user_id, username, transcription, speaker_info)
+            print(f"DEBUG: Sent transcription to Discord for {username}") # デバッグ用ログ
         else:
             await text_channel.send(f"**{username}**: _(転写失敗または音声なし)_")
             print(f"❌ {username} の音声転写に失敗しました (空またはNone)")
@@ -261,10 +263,10 @@ realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechTo
 
 # discord-ext-voice-recvのイベントリスナーを追加
 @bot.event
-async def on_voice_receive(user: discord.Member, pcm_chunk: bytes):
+async def on_voice_receive(user: discord.Member, audio_data): # ★★★ 修正箇所: audio_data を受け取るように変更 ★★★
     """
     discord-ext-voice-recv からリアルタイムで音声データを受信
-    注意: このイベントは音声チャンクが送られてくるたびに呼ばれる
+    audio_data は VoiceRecvClient.AudioPacket オブジェクトであると想定
     """
     if user.bot: # ボット自身の音声は無視
         return
@@ -279,8 +281,9 @@ async def on_voice_receive(user: discord.Member, pcm_chunk: bytes):
         if user_id not in realtime_audio_buffers[guild_id]:
             realtime_audio_buffers[guild_id][user.id] = bytearray()
         
-        # 音声データをバッファに追加 (pcm_chunkは生のPCMバイトデータ)
-        realtime_audio_buffers[guild_id][user.id].extend(pcm_chunk)
+        # 音声データをバッファに追加 (audio_data.packet.decrypted_data が生のPCMバイトデータ)
+        realtime_audio_buffers[guild_id][user.id].extend(audio_data.packet.decrypted_data)
+        # print(f"DEBUG: Received {len(audio_data.packet.decrypted_data)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[guild_id][user.id])}") # 高頻度で表示されるためコメントアウト
 
 @bot.event
 async def on_voice_member_speaking_start(member: discord.Member):
@@ -292,6 +295,7 @@ async def on_voice_member_speaking_start(member: discord.Member):
         # VAD状態を更新し、必要な初期化を行う
         if guild_id not in user_speaking_status:
             user_speaking_status[guild_id] = {}
+        print(f"DEBUG: on_voice_member_speaking_start for {member.display_name}") # デバッグ用ログ
         await realtime_voice_processor.handle_speaking_start(guild_id, member)
 
 @bot.event
@@ -301,6 +305,7 @@ async def on_voice_member_speaking_stop(member: discord.Member):
         return
     guild_id = member.guild.id
     if guild_id in connections and connections[guild_id].is_currently_recording:
+        print(f"DEBUG: on_voice_member_speaking_stop for {member.display_name}") # デバッグ用ログ
         await realtime_voice_processor.handle_speaking_stop(guild_id, member)
 
 
@@ -339,10 +344,17 @@ async def join(ctx):
         await asyncio.sleep(0.5) # 切断処理が完全に終わるのを待つ
 
     # VoiceRecvClient を使用して接続
-    # cls=VoiceRecvClient を指定。listen=True は不要。
-    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True) # ★★★ 修正箇所: listen=True を削除 ★★★
+    # cls=VoiceRecvClient を指定。
+    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True) 
     connections[ctx.guild.id] = vc
     vc.is_currently_recording = True # 録音開始フラグをTrueに設定
+
+    # 音声受信を明示的に開始
+    try:
+        await vc.start_receiving() # VoiceRecvClientのstart_receiving()を呼び出す
+        print("🔊 VoiceRecvClient started explicit receiving.")
+    except Exception as e:
+        print(f"❌ Error starting explicit receiving: {e}")
 
     await ctx.send(f'🎵 ボイスチャンネル **{voice_channel.name}** に接続しました！')
     print(f'Botがボイスチャンネル {voice_channel.name} に接続しました。')
