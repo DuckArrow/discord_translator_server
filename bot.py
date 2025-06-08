@@ -7,7 +7,7 @@ import time
 import wave
 import io
 import json
-import tempfile # 一時ファイル作成・管理用
+import tempfile 
 
 from typing import Optional, Dict, Any
 
@@ -16,8 +16,22 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# AudioPacketのインポートは不要なので削除
 
+
+# ★★★ 追加: discord.py の詳細ロギングを有効にする ★★★
+import logging
+
+# discord.py のロガーを設定
+handler = logging.StreamHandler()
+handler.setLevel(logging.INFO) # INFOレベル以上のログを出力
+formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
+handler.setFormatter(formatter)
+discord.utils.setup_logging(handler=handler, root=False)
+
+# voice_recv のロガーも設定 (必要であればDEBUGに上げてより詳細に)
+logging.getLogger('discord.ext.voice_recv').setLevel(logging.DEBUG)
+logging.getLogger('discord.voice_state').setLevel(logging.DEBUG)
+logging.getLogger('discord.gateway').setLevel(logging.DEBUG)
 
 # .env ファイルから環境変数をロード
 load_dotenv()
