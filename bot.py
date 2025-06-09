@@ -303,19 +303,18 @@ class AudioRecordingSink(AudioSink): # AudioSinkを継承
         print(f"DEBUG Sink: flush method called for {user.display_name}")
         pass # ここでは何もしない (on_voice_member_speaking_stop で処理)
 
-    # ★★★ 追加: AudioSinkの抽象メソッドを実装 ★★★
-    @property
+    # ★★★ 修正箇所: @property を削除し、通常のメソッドにする ★★★
     def wants_opus(self) -> bool:
         """シンクがOpus形式の音声データを希望するかどうかを返します。"""
         # faster-whisperはPCMデータを必要とするため、Falseを返します。
         return False 
+    # ★★★ 修正ここまで ★★★
 
     def cleanup(self):
         """シンクが破棄される際に呼び出されるクリーンアップメソッドです。"""
         # ここでは特にクリーンアップするリソースがないため、passとします。
         print("DEBUG Sink: cleanup method called.")
         pass
-    # ★★★ 追加ここまで ★★★
 
 
 @bot.event
