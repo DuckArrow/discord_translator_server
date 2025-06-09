@@ -16,9 +16,9 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# ★★★ 追加: カスタムシンクの基底クラスをインポート ★★★
-from discord.ext.voice_recv.sinks import BaseSink
-# ★★★ 追加ここまで ★★★
+# ★★★ 修正箇所: カスタムシンクの基底クラスを正しいパスからインポート ★★★
+from discord.ext.voice_recv import BaseSink
+# ★★★ 修正ここまで ★★★
 
 
 # ★★★ 追加: discord.py の詳細ロギングを有効にする ★★★
@@ -269,32 +269,7 @@ class RealtimeVoiceDataProcessor:
 # グローバルな音声データプロセッサを更新
 realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
 
-# ★★★ 修正箇所: on_voice_receive イベントを削除し、カスタムシンクに変更 ★★★
-# @bot.event
-# async def on_voice_receive(user: discord.Member, audio_data):
-#     """
-#     discord-ext-voice-recv からリアルタイムで音声データを受信
-#     audio_data は VoiceRecvClient.AudioPacket オブジェクトであると想定
-#     """
-#     print(f"--- DEBUG: on_voice_receive event triggered for {user.display_name} ---") 
-
-#     if user.bot:
-#         return
-
-#     guild_id = user.guild.id
-#     user_id = user.id
-
-#     if guild_id in connections and connections[guild_id].is_currently_recording:
-#         if guild_id not in realtime_audio_buffers:
-#             realtime_audio_buffers[guild_id] = {}
-#         if user_id not in realtime_audio_buffers[guild_id]:
-#             realtime_audio_buffers[guild_id][user.id] = bytearray()
-        
-#         realtime_audio_buffers[guild_id][user.id].extend(audio_data.packet.decrypted_data)
-#         print(f"DEBUG: Received {len(audio_data.packet.decrypted_data)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[guild_id][user.id])}")
-# ★★★ 修正ここまで ★★★
-
-# ★★★ 追加: 音声データを受け取るカスタムシンククラス ★★★
+# 音声データを受け取るカスタムシンククラス
 class AudioRecordingSink(BaseSink):
     """
     discord-ext-voice-recv の音声データを受け取るカスタムシンク。
@@ -322,7 +297,7 @@ class AudioRecordingSink(BaseSink):
         
         # 受信したPCMデータをユーザーのバッファに追加
         realtime_audio_buffers[self.guild_id][user.id].extend(data)
-        # print(f"DEBUG Sink: Received {len(data)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}")
+        print(f"DEBUG Sink: Received {len(data)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}") # デバッグ用に一時的に有効化
 
     def flush(self, user: discord.Member):
         """
@@ -331,7 +306,6 @@ class AudioRecordingSink(BaseSink):
         """
         print(f"DEBUG Sink: flush method called for {user.display_name}")
         pass # ここでは何もしない (on_voice_member_speaking_stop で処理)
-# ★★★ 追加ここまで ★★★
 
 
 @bot.event
@@ -397,12 +371,11 @@ async def join(ctx):
     connections[ctx.guild.id] = vc
     vc.is_currently_recording = True # 録音開始フラグをTrueに設定
 
-    # ★★★ 修正箇所: カスタムシンクをVoiceRecvClient.listen()に渡す ★★★
+    # カスタムシンクをVoiceRecvClient.listen()に渡す
     # vc.listen() は音声データを受け取るためのリスナーを開始します。
     # ここでカスタムの AudioRecordingSink インスタンスを渡します。
     vc.listen(AudioRecordingSink(realtime_voice_processor, ctx.guild.id))
     print(f"🔊 VoiceRecvClient listening with AudioRecordingSink for Guild {ctx.guild.id}.")
-    # ★★★ 修正ここまで ★★★
 
     await ctx.send(f'🎵 ボイスチャンネル **{voice_channel.name}** に接続しました！')
     print(f'Botがボイスチャンネル {voice_channel.name} に接続しました。')
