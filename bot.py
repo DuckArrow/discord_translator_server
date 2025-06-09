@@ -180,19 +180,20 @@ class RealtimeVoiceDataProcessor:
         print(f"🔇 {user.display_name} (ID: {user.id}) が話し終えました。")
         user_speaking_status[guild_id][user.id] = False
 
-        # 話し終えた際に残っているバッファを処理
-        guild_obj = bot.get_guild(guild_id)
-        if guild_obj:
-            text_channel_to_send = None
-            for channel in guild_obj.text_channels:
-                if channel.permissions_for(guild_obj.me).send_messages:
-                    text_channel_to_send = channel
-                    break
-            if text_channel_to_send:
-                # 残っている音声データを全て処理
-                await _process_user_remaining_audio(guild_id, user, text_channel_to_send)
-            else:
-                print(f"⚠️ ギルド {guild_id} でテキストチャンネルが見つかりませんでした。メッセージを送信できません。")
+        # ★★★ 修正箇所: ここでの音声処理を削除し、定期ループと最終処理に任せる ★★★
+        # guild_obj = bot.get_guild(guild_id)
+        # if guild_obj:
+        #     text_channel_to_send = None
+        #     for channel in guild_obj.text_channels:
+        #         if channel.permissions_for(guild_obj.me).send_messages:
+        #             text_channel_to_send = channel
+        #             break
+        #     if text_channel_to_send:
+        #         await _process_user_remaining_audio(guild_id, user, text_channel_to_send)
+        #     else:
+        #         print(f"⚠️ ギルド {guild_id} でテキストチャンネルが見つかりませんでした。メッセージを送信できません。")
+        # ★★★ 修正ここまで ★★★
+
 
     async def _process_audio_chunk_and_transcribe(self, pcm_data: bytes, user_id: int, username: str, text_channel: discord.TextChannel):
         """個別のユーザーの音声データチャンクを処理（保存、転写、結果送信）"""
@@ -290,6 +291,7 @@ class RealtimeVoiceDataProcessor:
                 is_speaking = user_speaking_status.get(guild_id, {}).get(user_id, False)
 
                 # ユーザーのバッファに文字起こしチャンクサイズ以上のデータがある場合
+                # 話しているかどうかにかかわらず、データが溜まっていれば処理する
                 if buffer_length >= TRANSCRIPTION_CHUNK_BYTES:
                     # チャンクを切り出し、処理
                     chunk_to_process = bytes(current_buffer[:TRANSCRIPTION_CHUNK_BYTES])
@@ -301,8 +303,9 @@ class RealtimeVoiceDataProcessor:
                             chunk_to_process, user.id, user.display_name, text_channel
                         )
                     )
-                # ユーザーが話しておらず、かつバッファに最小処理チャンク以上のデータが残っている場合
+                # ユーザーが話しておらず（VADがオフ）、かつバッファに最小処理チャンク以上のデータが残っている場合
                 # これは、短い発話の終わりや、VADがオフになった後に残ったデータに対応
+                # NOTE: ここでバッファを pop することで、このユーザーの残りの音声が処理される
                 elif not is_speaking and buffer_length >= MIN_PROCESS_CHUNK_BYTES:
                     # 残っているデータを全て処理し、バッファをクリア
                     chunk_to_process = bytes(realtime_audio_buffers[guild_id].pop(user_id))
@@ -376,7 +379,7 @@ class AudioRecordingSink(AudioSink): # AudioSinkを継承
             realtime_audio_buffers[self.guild_id][user.id] = bytearray()
         
         realtime_audio_buffers[self.guild_id][user.id].extend(data.pcm) # data.pcm を使用
-        # print(f"DEBUG Sink: Received {len(data.pcm)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}") # デバッグ用に一時的に有効化
+        print(f"DEBUG Sink: Received {len(data.pcm)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}") # デバッグ用に一時的に有効化
 
     def flush(self, user: discord.Member):
         """
