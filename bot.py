@@ -16,8 +16,8 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# ★★★ 修正箇所: BaseSinkのインポートを削除 ★★★
-# from discord.ext.voice_recv import BaseSink
+# ★★★ 修正箇所: AudioSinkをインポート ★★★
+from discord.ext.voice_recv import AudioSink # AudioSinkをインポートします
 # ★★★ 修正ここまで ★★★
 
 
@@ -270,14 +270,14 @@ class RealtimeVoiceDataProcessor:
 realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
 
 # 音声データを受け取るカスタムシンククラス
-# ★★★ 修正箇所: BaseSinkを継承しない（ダックタイピング） ★★★
-class AudioRecordingSink: # BaseSinkを削除
+# ★★★ 修正箇所: AudioSinkを継承する ★★★
+class AudioRecordingSink(AudioSink): # AudioSinkを継承
     """
     discord-ext-voice-recv の音声データを受け取るカスタムシンク。
     PCMデータをバッファリングし、RealtimeVoiceDataProcessorに渡します。
     """
     def __init__(self, processor: RealtimeVoiceDataProcessor, guild_id: int):
-        # super().__init__() # BaseSinkを継承しないので不要
+        super().__init__() # AudioSinkのコンストラクタを呼び出す
         self.processor = processor
         self.guild_id = guild_id
         
@@ -416,7 +416,7 @@ async def stop(ctx):
                     user = bot.get_user(user_id) or ctx.guild.get_member(user_id)
                     if user:
                         await realtime_voice_processor.process_single_user_audio(
-                            bytes(pcm_data_buffer), user_id, user.display_name, ctx.channel
+                            bytes(pcm_data_buffer), user.id, user.display_name, ctx.channel
                         )
             realtime_audio_buffers[ctx.guild.id].clear() # バッファをクリア
             user_speaking_status[ctx.guild.id].clear() # 状態をクリア
