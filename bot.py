@@ -7,46 +7,56 @@ import time
 import wave
 import io
 import json
-import tempfile # 一時ファイル作成・管理用
-
-from typing import Optional, Dict, Any
+import tempfile
+import threading
+import queue
+from collections import deque
+from typing import Optional, Dict, Any, List
+import numpy as np
 
 # faster-whisperのインポート
 from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-from discord.ext.voice_recv import AudioSink # AudioSinkをインポートします
-from discord.ext.voice_recv import VoiceData # VoiceDataの型ヒントのためにインポート
+from discord.ext.voice_recv import AudioSink
+from discord.ext.voice_recv import VoiceData
 
+# VAD (Voice Activity Detection) 用
+import webrtcvad
 
-# ★★★ discord.py の詳細ロギングを有効にする ★★★
-import logging
+# ★★★ 新しい設定 ★★★
+# リアルタイム性向上のための設定
+REALTIME_CHUNK_DURATION_MS = 500  # 500ms（0.5秒）でチャンク処理
+VAD_AGGRESSIVENESS = 2  # VADの感度 (0-3, 3が最も厳格)
+MIN_SPEECH_DURATION_MS = 300  # 最小発話時間（300ms）
+SILENCE_THRESHOLD_MS = 800  # 無音時間がこれを超えると発話終了とみなす
+OVERLAP_DURATION_MS = 200  # チャンク間のオーバーラップ
 
-# discord.py のロガーを設定
-handler = logging.StreamHandler()
-handler.setLevel(logging.INFO) # INFOレベル以上のログを出力
-formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
-handler.setFormatter(formatter)
-discord.utils.setup_logging(handler=handler, root=False)
+# 音声品質設定（16kHzに変更してWhisperの処理を高速化）
+WHISPER_SAMPLE_RATE = 16000  # Whisperの推奨サンプルレート
+PCM_SAMPLE_RATE = 48000  # Discordの音声データ
+PCM_BYTES_PER_SAMPLE = 2
+PCM_CHANNELS = 2
 
-# voice_recv のロガーも設定 (必要であればDEBUGに上げてより詳細に)
-logging.getLogger('discord.ext.voice_recv').setLevel(logging.DEBUG)
-logging.getLogger('discord.voice_state').setLevel(logging.DEBUG)
-logging.getLogger('discord.gateway').setLevel(logging.DEBUG)
-# ★★★ 追加ここまで ★★★
+# 計算用定数
+REALTIME_CHUNK_SAMPLES = int(WHISPER_SAMPLE_RATE * REALTIME_CHUNK_DURATION_MS / 1000)
+REALTIME_CHUNK_BYTES = REALTIME_CHUNK_SAMPLES * 2  # 16-bit mono
+
+# ★★★ 従来の設定（コメントアウト） ★★★
+# TRANSCRIPTION_CHUNK_DURATION_SECONDS = 2
+# TRANSCRIPTION_CHUNK_BYTES = PCM_SAMPLE_RATE * PCM_BYTES_PER_SAMPLE * PCM_CHANNELS * TRANSCRIPTION_CHUNK_DURATION_SECONDS
 
 # .env ファイルから環境変数をロード
 load_dotenv()
 
-# 各種トークン・APIキーを取得
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
 # Botのインテントを設定
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-intents.members = True # メンバー情報（display_nameなど）取得のために必要
+intents.members = True
 
 # Botの初期化
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -55,379 +65,350 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 AUDIO_OUTPUT_DIR = "recorded_audio"
 os.makedirs(AUDIO_OUTPUT_DIR, exist_ok=True)
 
-# ユーザー音声プロファイル管理 (現在は未使用、将来の話者識別強化用)
-user_voice_profiles: Dict[int, Dict[str, Any]] = {}
 # ギルドごとのボイス接続を管理
-connections: Dict[int, VoiceRecvClient] = {} # VoiceRecvClient 型を指定
+connections: Dict[int, VoiceRecvClient] = {}
 
-# リアルタイム録音バッファをユーザーごとに管理
-# 例: {guild_id: {user_id: bytearray_of_audio_data, ...}}
-realtime_audio_buffers: Dict[int, Dict[int, bytearray]] = {}
-# ユーザーごとのVAD状態を管理
-# 例: {guild_id: {user_id: True/False, ...}}
-user_speaking_status: Dict[int, Dict[int, bool]] = {}
-# 転写処理の非同期タスクを管理
-transcription_tasks: Dict[int, Dict[int, asyncio.Task]] = {}
-
-
-# faster-whisper モデルのグローバル変数
-# Bot起動時に一度だけロード
-# モデルサイズを選択 (tiny, base, small, medium, large)
-# device="cpu" を指定することでCPUを使用。GPUがある場合は device="cuda"
-# compute_type="int8" はより少ないメモリと高速な推論を提供しますが、精度に影響する場合があります。
-# より高い精度が必要な場合は "float16" や "float32" を試してください。
+# Whisperモデルのグローバル変数
 WHISPER_MODEL: Optional[WhisperModel] = None
-WHISPER_MODEL_SIZE = "base" # 推奨: "base" または "small"
-WHISPER_DEVICE = "cpu" # GPUがある場合は "cuda" を試す
-WHISPER_COMPUTE_TYPE = "int8" # CPUの場合は "int8" が効率的
-
-# 文字起こしチャンクの長さ（秒単位）。これにより、何秒ごとに文字起こしを試みるかを決定
-TRANSCRIPTION_CHUNK_DURATION_SECONDS = 2 # ★★★ 5秒から2秒に変更 ★★★
-# PCMデータレート (48kHz, 16bit, stereo)
-PCM_SAMPLE_RATE = 48000
-PCM_BYTES_PER_SAMPLE = 2 # 16-bit
-PCM_CHANNELS = 2 # Stereo
-# チャンクあたりのバイト数 = サンプルレート * バイト/サンプル * チャンネル数 * 期間
-TRANSCRIPTION_CHUNK_BYTES = PCM_SAMPLE_RATE * PCM_BYTES_PER_SAMPLE * PCM_CHANNELS * TRANSCRIPTION_CHUNK_DURATION_SECONDS
-# 最小処理チャンク（これ未満のデータは処理しない）
-MIN_PROCESS_CHUNK_BYTES = PCM_SAMPLE_RATE * PCM_BYTES_PER_SAMPLE * PCM_CHANNELS * 1 # 1秒分
+WHISPER_MODEL_SIZE = "base"
+WHISPER_DEVICE = "cpu"
+WHISPER_COMPUTE_TYPE = "int8"
 
 
-class SpeechToTextHandler:
-    """Speech to Text (STT) 呼び出しを管理するクラス"""
+class AudioUtils:
+    """音声データ処理のユーティリティクラス"""
     
-    def __init__(self, whisper_model: WhisperModel):
-        self.whisper_model = whisper_model
-
-    # transcribe_with_local_whisper は同期処理として定義し、呼び出し側でto_threadを使う
-    def transcribe_with_local_whisper_sync(self, audio_file_path: str) -> Optional[str]:
-        """faster-whisper を使用してローカルで音声をテキストに変換 (同期版)"""
-        if self.whisper_model is None:
-            print("Whisper モデルがロードされていません。")
-            return None
-        
-        try:
-            # faster-whisperで音声を転写
-            # language='ja' で日本語を指定、vad_filter=True で無音部分をフィルタリング
-            segments, info = self.whisper_model.transcribe(
-                audio_file_path, 
-                language="ja", 
-                beam_size=5, # 推論のビームサイズ
-                vad_filter=True # 無音部分のフィルタリングを有効にする
-            )
-            
-            transcription_text = []
-            for segment in segments:
-                transcription_text.append(segment.text)
-            
-            return "".join(transcription_text)
-
-        except FileNotFoundError:
-            print(f"一時音声ファイルが見つかりません: {audio_file_path}")
-            return None
-        except Exception as e:
-            print(f"ローカルWhisper音声転写エラー: {e}")
-            return None
-
-    # 非同期版のtranscribeメソッド (to_threadで同期版をラップする)
-    async def transcribe_with_local_whisper(self, audio_file_path: str) -> Optional[str]:
-        """faster-whisper を使用してローカルで音声をテキストに変換 (非同期ラッパー)"""
-        # 重い処理を別のスレッドで実行し、メインイベントループをブロックしない
-        return await asyncio.to_thread(self.transcribe_with_local_whisper_sync, audio_file_path)
-
-
     @staticmethod
-    async def transcribe_with_google(audio_file_path: str) -> Optional[str]:
-        """Google Cloud Speech-to-Text APIを使用（未実装）"""
-        # Google Cloud STT APIの実装は別途必要です。
-        # 実際の実装はGoogle Cloud SDKを使用することを推奨
-        print("Google Cloud STT APIは現在実装されていません。")
+    def resample_audio(audio_data: bytes, original_rate: int, target_rate: int) -> bytes:
+        """音声データを16kHzにリサンプリング（簡易版）"""
+        if original_rate == target_rate:
+            return audio_data
+        
+        # NumPyを使用してリサンプリング
+        audio_array = np.frombuffer(audio_data, dtype=np.int16)
+        
+        # ステレオからモノラルに変換
+        if len(audio_array) % 2 == 0:
+            audio_array = audio_array.reshape(-1, 2).mean(axis=1).astype(np.int16)
+        
+        # 簡易リサンプリング（より高品質なライブラリを使用することを推奨）
+        ratio = target_rate / original_rate
+        new_length = int(len(audio_array) * ratio)
+        resampled = np.interp(
+            np.linspace(0, len(audio_array) - 1, new_length),
+            np.arange(len(audio_array)),
+            audio_array
+        ).astype(np.int16)
+        
+        return resampled.tobytes()
+    
+    @staticmethod
+    def apply_vad(audio_data: bytes, sample_rate: int, vad_aggressiveness: int = 2) -> bool:
+        """WebRTC VADを使用して音声活動を検出"""
+        try:
+            vad = webrtcvad.Vad(vad_aggressiveness)
+            
+            # VADは特定のサンプルレートとフレームサイズに対応
+            if sample_rate not in [8000, 16000, 32000, 48000]:
+                return True  # サポートされていないサンプルレートの場合は音声ありとみなす
+            
+            # フレームサイズ（10ms, 20ms, 30ms）
+            frame_duration_ms = 30
+            frame_size = int(sample_rate * frame_duration_ms / 1000) * 2  # 16-bit
+            
+            if len(audio_data) < frame_size:
+                return False
+                
+            # フレームを切り出してVADを適用
+            for i in range(0, len(audio_data) - frame_size + 1, frame_size):
+                frame = audio_data[i:i + frame_size]
+                if vad.is_speech(frame, sample_rate):
+                    return True
+            
+            return False
+        except Exception as e:
+            print(f"VADエラー: {e}")
+            return True  # エラーの場合は音声ありとみなす
+
+
+class RealtimeTranscriptionEngine:
+    """リアルタイム文字起こしエンジン"""
+    
+    def __init__(self, whisper_model: WhisperModel, output_dir: str):
+        self.whisper_model = whisper_model
+        self.output_dir = output_dir
+        self.transcription_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        self.is_running = False
+        self.worker_thread = None
+        
+    def start(self):
+        """バックグラウンド処理を開始"""
+        if not self.is_running:
+            self.is_running = True
+            self.worker_thread = threading.Thread(target=self._transcription_worker, daemon=True)
+            self.worker_thread.start()
+            print("リアルタイム文字起こしエンジンを開始しました")
+    
+    def stop(self):
+        """バックグラウンド処理を停止"""
+        self.is_running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5.0)
+            print("リアルタイム文字起こしエンジンを停止しました")
+    
+    def submit_audio(self, audio_data: bytes, user_id: int, username: str, guild_id: int):
+        """音声データを処理キューに追加"""
+        if self.is_running:
+            self.transcription_queue.put({
+                'audio_data': audio_data,
+                'user_id': user_id,
+                'username': username,
+                'guild_id': guild_id,
+                'timestamp': time.time()
+            })
+    
+    def get_result(self) -> Optional[Dict]:
+        """処理結果を取得"""
+        try:
+            return self.result_queue.get_nowait()
+        except queue.Empty:
+            return None
+    
+    def _transcription_worker(self):
+        """バックグラウンドで文字起こしを処理するワーカー"""
+        while self.is_running:
+            try:
+                # タスクを取得（0.1秒でタイムアウト）
+                task = self.transcription_queue.get(timeout=0.1)
+                
+                # 音声データをWAVファイルに変換
+                audio_data = task['audio_data']
+                if len(audio_data) < REALTIME_CHUNK_BYTES:
+                    continue
+                
+                # 一時ファイルを作成
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
+                    temp_path = temp_file.name
+                
+                try:
+                    # WAVファイルとして保存
+                    with wave.open(temp_path, 'wb') as wf:
+                        wf.setnchannels(1)  # モノラル
+                        wf.setsampwidth(2)  # 16-bit
+                        wf.setframerate(WHISPER_SAMPLE_RATE)
+                        wf.writeframes(audio_data)
+                    
+                    # Whisperで文字起こし
+                    if self.whisper_model:
+                        segments, info = self.whisper_model.transcribe(
+                            temp_path,
+                            language="ja",
+                            beam_size=1,  # 高速化のためビームサイズを1に
+                            vad_filter=True,
+                            no_speech_threshold=0.6,
+                            condition_on_previous_text=False  # 前のテキストに依存しない
+                        )
+                        
+                        transcription = ""
+                        for segment in segments:
+                            transcription += segment.text
+                        
+                        if transcription.strip():
+                            self.result_queue.put({
+                                'user_id': task['user_id'],
+                                'username': task['username'],
+                                'guild_id': task['guild_id'],
+                                'transcription': transcription.strip(),
+                                'timestamp': task['timestamp']
+                            })
+                
+                finally:
+                    # 一時ファイルを削除
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+            
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"文字起こし処理エラー: {e}")
+
+
+class StreamingAudioBuffer:
+    """ストリーミング音声バッファ"""
+    
+    def __init__(self, user_id: int, username: str):
+        self.user_id = user_id
+        self.username = username
+        self.audio_buffer = deque()
+        self.last_speech_time = 0
+        self.is_speaking = False
+        self.accumulated_audio = bytearray()
+        
+    def add_audio(self, audio_data: bytes):
+        """音声データを追加"""
+        current_time = time.time()
+        
+        # 16kHzにリサンプリング
+        resampled_audio = AudioUtils.resample_audio(
+            audio_data, PCM_SAMPLE_RATE, WHISPER_SAMPLE_RATE
+        )
+        
+        # VADで音声活動を検出
+        has_speech = AudioUtils.apply_vad(resampled_audio, WHISPER_SAMPLE_RATE, VAD_AGGRESSIVENESS)
+        
+        if has_speech:
+            self.last_speech_time = current_time
+            self.is_speaking = True
+            self.accumulated_audio.extend(resampled_audio)
+        else:
+            # 無音時間が閾値を超えた場合
+            if self.is_speaking and (current_time - self.last_speech_time) > (SILENCE_THRESHOLD_MS / 1000):
+                self.is_speaking = False
+                return True  # 発話終了を示す
+            elif self.is_speaking:
+                # まだ発話中の場合は無音部分も含める
+                self.accumulated_audio.extend(resampled_audio)
+        
+        return False
+    
+    def get_audio_chunk(self) -> Optional[bytes]:
+        """音声チャンクを取得"""
+        if len(self.accumulated_audio) >= REALTIME_CHUNK_BYTES:
+            chunk = bytes(self.accumulated_audio[:REALTIME_CHUNK_BYTES])
+            # オーバーラップのために一部データを残す
+            overlap_bytes = int(REALTIME_CHUNK_BYTES * OVERLAP_DURATION_MS / REALTIME_CHUNK_DURATION_MS)
+            self.accumulated_audio = self.accumulated_audio[REALTIME_CHUNK_BYTES - overlap_bytes:]
+            return chunk
+        return None
+    
+    def get_remaining_audio(self) -> Optional[bytes]:
+        """残りの音声データを取得"""
+        if len(self.accumulated_audio) > 0:
+            chunk = bytes(self.accumulated_audio)
+            self.accumulated_audio.clear()
+            return chunk
         return None
 
-class RealtimeVoiceDataProcessor:
-    """リアルタイム音声データ処理とSTT処理を管理するクラス"""
+
+class RealtimeVoiceProcessor:
+    """リアルタイム音声プロセッサー"""
     
-    def __init__(self, output_dir: str, stt_handler: SpeechToTextHandler):
-        self.output_dir = output_dir
-        self.stt_handler = stt_handler
-        self.start_time = int(time.time())
-        self.periodic_transcription_tasks: Dict[int, asyncio.Task] = {} # Guild ID -> Task
-
-    def identify_speaker(self, user_id: int, user_name: str) -> Dict[str, Any]:
-        """話者識別処理（このコードではDiscordユーザーIDを使用）"""
-        speaker_info = {
-            'user_id': user_id,
-            'user_name': user_name,
-            'confidence': 1.0,  # Discord APIから直接得られるユーザーIDなので信頼度100%
-            'voice_characteristics': {
-                'platform': 'Discord',
-                'identification_method': 'discord_user_id'
-            }
-        }
-        return speaker_info
-
-    async def handle_speaking_start(self, guild_id: int, user: discord.Member):
-        """ユーザーが話し始めたときの処理"""
-        print(f"🎤 {user.display_name} (ID: {user.id}) が話し始めました。")
-        if guild_id not in realtime_audio_buffers:
-            realtime_audio_buffers[guild_id] = {}
-        if user.id not in realtime_audio_buffers[guild_id]:
-            realtime_audio_buffers[guild_id][user.id] = bytearray()
-        user_speaking_status[guild_id][user.id] = True
-
-    async def handle_speaking_stop(self, guild_id: int, user: discord.Member):
-        """ユーザーが話し終えたときの処理"""
-        print(f"🔇 {user.display_name} (ID: {user.id}) が話し終えました。")
-        user_speaking_status[guild_id][user.id] = False
-
-        # ★★★ 修正箇所: ここでの音声処理を削除し、定期ループと最終処理に任せる ★★★
-        # guild_obj = bot.get_guild(guild_id)
-        # if guild_obj:
-        #     text_channel_to_send = None
-        #     for channel in guild_obj.text_channels:
-        #         if channel.permissions_for(guild_obj.me).send_messages:
-        #             text_channel_to_send = channel
-        #             break
-        #     if text_channel_to_send:
-        #         await _process_user_remaining_audio(guild_id, user, text_channel_to_send)
-        #     else:
-        #         print(f"⚠️ ギルド {guild_id} でテキストチャンネルが見つかりませんでした。メッセージを送信できません。")
-        # ★★★ 修正ここまで ★★★
-
-
-    async def _process_audio_chunk_and_transcribe(self, pcm_data: bytes, user_id: int, username: str, text_channel: discord.TextChannel):
-        """個別のユーザーの音声データチャンクを処理（保存、転写、結果送信）"""
-        if not pcm_data:
-            print(f"DEBUG: {username} の音声チャンクが空です。処理をスキップします。")
+    def __init__(self, transcription_engine: RealtimeTranscriptionEngine):
+        self.transcription_engine = transcription_engine
+        self.audio_buffers: Dict[int, Dict[int, StreamingAudioBuffer]] = {}  # guild_id -> user_id -> buffer
+        self.text_channels: Dict[int, discord.TextChannel] = {}  # guild_id -> channel
+        self.result_polling_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> task
+        
+    def start_processing(self, guild_id: int, text_channel: discord.TextChannel):
+        """処理を開始"""
+        self.text_channels[guild_id] = text_channel
+        if guild_id not in self.audio_buffers:
+            self.audio_buffers[guild_id] = {}
+        
+        # 結果ポーリングタスクを開始
+        if guild_id not in self.result_polling_tasks or self.result_polling_tasks[guild_id].done():
+            self.result_polling_tasks[guild_id] = asyncio.create_task(
+                self._result_polling_loop(guild_id)
+            )
+        
+        self.transcription_engine.start()
+        print(f"リアルタイム音声処理を開始: Guild {guild_id}")
+    
+    def stop_processing(self, guild_id: int):
+        """処理を停止"""
+        if guild_id in self.result_polling_tasks:
+            self.result_polling_tasks[guild_id].cancel()
+            del self.result_polling_tasks[guild_id]
+        
+        if guild_id in self.audio_buffers:
+            del self.audio_buffers[guild_id]
+        
+        if guild_id in self.text_channels:
+            del self.text_channels[guild_id]
+        
+        print(f"リアルタイム音声処理を停止: Guild {guild_id}")
+    
+    def process_audio(self, guild_id: int, user_id: int, username: str, audio_data: bytes):
+        """音声データを処理"""
+        if guild_id not in self.audio_buffers:
             return
-
-        print(f"--- 音声チャンク処理開始: {username} (長さ: {len(pcm_data)} バイト) ---")
-        speaker_info = self.identify_speaker(user_id, username)
         
-        temp_audio_path = None
-        try:
-            temp_audio_path = await self.save_temp_audio_file(pcm_data, user_id, username)
-        except Exception as e:
-            print(f"一時音声ファイル保存エラー ({username}): {e}")
-
-        transcription = None
-        if temp_audio_path:
-            transcription = await self.stt_handler.transcribe_with_local_whisper(temp_audio_path)
-            try:
-                os.remove(temp_audio_path)
-                print(f"🗑️ 一時ファイルを削除しました: {temp_audio_path}")
-            except Exception as e:
-                print(f"一時ファイル削除エラー: {temp_audio_path} - {e}")
-        else:
-            print(f"❌ {username} の一時音声ファイル保存に失敗しました (temp_audio_path is None)")
-
-        if transcription and transcription.strip():
-            await text_channel.send(f"**{username}**: {transcription}")
-            # ここでは、チャンクごとの文字起こしも保存する（必要に応じて調整）
-            await self.save_transcription(user_id, username, transcription, speaker_info)
-            print(f"DEBUG: Sent transcription chunk to Discord for {username}")
-        else:
-            print(f"DEBUG: {username} の音声チャンクは転写されませんでした (空またはNone)。")
-        print(f"--- 音声チャンク処理完了: {username} ---")
-
-
-    async def save_temp_audio_file(self, pcm_data: bytes, user_id: int, username: str) -> Optional[str]:
-        """PCMデータをWAV形式で一時ファイルに保存"""
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_file:
-                temp_path = temp_file.name
-                
-            with wave.open(temp_path, 'wb') as wf:
-                wf.setnchannels(PCM_CHANNELS)    # ステレオ
-                wf.setsampwidth(PCM_BYTES_PER_SAMPLE)    # 16-bit (2バイト/サンプル)
-                wf.setframerate(PCM_SAMPLE_RATE) # 48kHz
-                wf.writeframes(pcm_data) # PCMデータを書き込む
-                
-            print(f"📁 一時ファイル保存: {username} -> {temp_path}")
-            return temp_path
-            
-        except Exception as e:
-            print(f"一時ファイル保存エラー ({username}): {e}")
-            return None
-
-    async def save_transcription(self, user_id: int, username: str, transcription: str, speaker_info: Dict):
-        """転写結果をJSONL形式でファイルに保存"""
-        transcript_file = os.path.join(self.output_dir, f"transcriptions_{self.start_time}.jsonl")
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        if user_id not in self.audio_buffers[guild_id]:
+            self.audio_buffers[guild_id][user_id] = StreamingAudioBuffer(user_id, username)
         
-        transcript_entry = {
-            'timestamp': timestamp,
-            'user_id': user_id,
-            'username': username,
-            'transcription': transcription,
-            'speaker_info': speaker_info
-        }
+        buffer = self.audio_buffers[guild_id][user_id]
         
-        try:
-            with open(transcript_file, 'a', encoding='utf-8') as f:
-                f.write(f"{json.dumps(transcript_entry, ensure_ascii=False)}\n")
-            print(f"💾 転写結果保存: {transcript_file}")
-        except Exception as e:
-            print(f"転写結果保存エラー: {e}")
-
-    async def _periodic_transcribe_loop(self, guild_id: int, text_channel: discord.TextChannel):
-        """定期的に音声バッファをチェックし、文字起こしを行うループ"""
+        # 音声データを追加
+        speech_ended = buffer.add_audio(audio_data)
+        
+        # チャンクが準備できているか確認
+        chunk = buffer.get_audio_chunk()
+        if chunk:
+            self.transcription_engine.submit_audio(chunk, user_id, username, guild_id)
+        
+        # 発話が終了した場合、残りのデータを処理
+        if speech_ended:
+            remaining = buffer.get_remaining_audio()
+            if remaining and len(remaining) >= REALTIME_CHUNK_BYTES // 2:  # 半分以上のデータがある場合
+                self.transcription_engine.submit_audio(remaining, user_id, username, guild_id)
+    
+    async def _result_polling_loop(self, guild_id: int):
+        """結果ポーリングループ"""
         while True:
-            await asyncio.sleep(TRANSCRIPTION_CHUNK_DURATION_SECONDS) # 設定された秒数ごとにチェック
-
-            if guild_id not in realtime_audio_buffers:
-                continue
-
-            # Iterate over a copy of items to allow modification during iteration
-            for user_id, current_buffer in list(realtime_audio_buffers[guild_id].items()):
-                user = bot.get_user(user_id) or text_channel.guild.get_member(user_id)
-                if not user:
-                    # User left or is no longer available, clean up their buffer
-                    realtime_audio_buffers[guild_id].pop(user_id, None)
-                    user_speaking_status[guild_id].pop(user_id, None)
-                    continue
-
-                buffer_length = len(current_buffer)
-                is_speaking = user_speaking_status.get(guild_id, {}).get(user_id, False)
-
-                # ユーザーのバッファに文字起こしチャンクサイズ以上のデータがある場合
-                # 話しているかどうかにかかわらず、データが溜まっていれば処理する
-                if buffer_length >= TRANSCRIPTION_CHUNK_BYTES:
-                    # チャンクを切り出し、処理
-                    chunk_to_process = bytes(current_buffer[:TRANSCRIPTION_CHUNK_BYTES])
-                    realtime_audio_buffers[guild_id][user_id] = bytearray(current_buffer[TRANSCRIPTION_CHUNK_BYTES:])
-                    
-                    print(f"DEBUG Periodic (Chunk): Processing chunk for {user.display_name} (length: {len(chunk_to_process)} bytes), Remaining buffer: {len(realtime_audio_buffers[guild_id][user_id])} bytes")
-                    asyncio.create_task(
-                        self._process_audio_chunk_and_transcribe(
-                            chunk_to_process, user.id, user.display_name, text_channel
-                        )
-                    )
-                # ユーザーが話しておらず（VADがオフ）、かつバッファに最小処理チャンク以上のデータが残っている場合
-                # これは、短い発話の終わりや、VADがオフになった後に残ったデータに対応
-                # NOTE: ここでバッファを pop することで、このユーザーの残りの音声が処理される
-                elif not is_speaking and buffer_length >= MIN_PROCESS_CHUNK_BYTES:
-                    # 残っているデータを全て処理し、バッファをクリア
-                    chunk_to_process = bytes(realtime_audio_buffers[guild_id].pop(user_id))
-                    print(f"DEBUG Periodic (Stopped leftover): Processing remaining audio for {user.display_name} (length: {len(chunk_to_process)} bytes)")
-                    asyncio.create_task(
-                        self._process_audio_chunk_and_transcribe(
-                            chunk_to_process, user.id, user.display_name, text_channel
-                        )
-                    )
-                # else: 非常に短いデータは、次回のチャンクに結合されるまで待機するか、最終的に `on_voice_member_speaking_stop` で処理される
-
-    def start_periodic_transcription_loop(self, guild_id: int, text_channel: discord.TextChannel):
-        """定期的な文字起こしループを開始"""
-        if guild_id not in self.periodic_transcription_tasks or self.periodic_transcription_tasks[guild_id].done():
-            print(f"Starting periodic transcription loop for guild {guild_id}")
-            self.periodic_transcription_tasks[guild_id] = asyncio.create_task(
-                self._periodic_transcribe_loop(guild_id, text_channel)
-            )
-
-    def stop_periodic_transcription_loop(self, guild_id: int):
-        """定期的な文字起こしループを停止"""
-        if guild_id in self.periodic_transcription_tasks and not self.periodic_transcription_tasks[guild_id].done():
-            print(f"Stopping periodic transcription loop for guild {guild_id}")
-            self.periodic_transcription_tasks[guild_id].cancel()
-            del self.periodic_transcription_tasks[guild_id]
-
-# グローバルな音声データプロセッサを更新
-realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
-
-# ユーザーの残りの音声データを処理するためのヘルパー関数
-async def _process_user_remaining_audio(guild_id: int, user: discord.Member, text_channel: discord.TextChannel):
-    """ユーザーのバッファに残っている音声データを処理し、文字起こしするヘルパー関数"""
-    if guild_id in realtime_audio_buffers and user.id in realtime_audio_buffers[guild_id]:
-        pcm_data = bytes(realtime_audio_buffers[guild_id].pop(user.id))
-        if pcm_data:
-            print(f"DEBUG Final Process: Processing remaining audio for {user.display_name} (length: {len(pcm_data)} bytes)")
-            await realtime_voice_processor._process_audio_chunk_and_transcribe(
-                pcm_data,
-                user.id,
-                user.display_name,
-                text_channel
-            )
-        else:
-            print(f"⚠️ {user.display_name} の音声データが空でした (最終処理)。")
-    else:
-        print(f"⚠️ {user.display_name} の音声バッファがありませんでした (最終処理)。")
+            try:
+                result = self.transcription_engine.get_result()
+                if result and result['guild_id'] == guild_id:
+                    text_channel = self.text_channels.get(guild_id)
+                    if text_channel:
+                        await text_channel.send(f"**{result['username']}**: {result['transcription']}")
+                        print(f"文字起こし送信: {result['username']} -> {result['transcription']}")
+                
+                await asyncio.sleep(0.05)  # 50msごとにチェック
+            except Exception as e:
+                print(f"結果ポーリングエラー: {e}")
+                break
 
 
-# 音声データを受け取るカスタムシンククラス
-class AudioRecordingSink(AudioSink): # AudioSinkを継承
-    """
-    discord-ext-voice-recv の音声データを受け取るカスタムシンク。
-    PCMデータをバッファリングし、RealtimeVoiceDataProcessorに渡します。
-    """
-    def __init__(self, processor: RealtimeVoiceDataProcessor, guild_id: int):
-        super().__init__() # AudioSinkのコンストラクタを呼び出す
+# グローバル変数
+transcription_engine: Optional[RealtimeTranscriptionEngine] = None
+voice_processor: Optional[RealtimeVoiceProcessor] = None
+
+
+class OptimizedAudioSink(AudioSink):
+    """最適化された音声シンク"""
+    
+    def __init__(self, processor: RealtimeVoiceProcessor, guild_id: int):
+        super().__init__()
         self.processor = processor
         self.guild_id = guild_id
         
-    def write(self, user: discord.Member, data: VoiceData): # 型ヒントをVoiceDataに変更
-        """
-        ユーザーからのデコード済み音声データ（PCMバイトデータ）を受信し、バッファリングします。
-        """
+    def write(self, user: discord.Member, data: VoiceData):
+        """音声データを受信"""
         if user.bot:
             return
-
-        # 音声データバッファの存在を確認し、なければ初期化
-        if self.guild_id not in realtime_audio_buffers:
-            realtime_audio_buffers[self.guild_id] = {}
-        if user.id not in realtime_audio_buffers[self.guild_id]:
-            realtime_audio_buffers[self.guild_id][user.id] = bytearray()
         
-        realtime_audio_buffers[self.guild_id][user.id].extend(data.pcm) # data.pcm を使用
-        print(f"DEBUG Sink: Received {len(data.pcm)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}") # デバッグ用に一時的に有効化
-
-    def flush(self, user: discord.Member):
-        """
-        ユーザーの音声が終了したときに呼び出されますが、
-        今回は on_voice_member_speaking_stop を主要なトリガーとして使用します。
-        """
-        print(f"DEBUG Sink: flush method called for {user.display_name}")
-        pass # ここでは何もしない (on_voice_member_speaking_stop で処理)
-
+        # リアルタイム処理に音声データを送信
+        self.processor.process_audio(
+            self.guild_id, 
+            user.id, 
+            user.display_name, 
+            data.pcm
+        )
+    
     def wants_opus(self) -> bool:
-        """シンクがOpus形式の音声データを希望するかどうかを返します。"""
-        # faster-whisperはPCMデータを必要とするため、Falseを返します。
-        return False 
-
+        return False
+    
     def cleanup(self):
-        """シンクが破棄される際に呼び出されるクリーンアップメソッドです。"""
-        # ここでは特にクリーンアップするリソースがないため、passとします。
-        print("DEBUG Sink: cleanup method called.")
         pass
 
 
-@bot.event
-async def on_voice_member_speaking_start(member: discord.Member):
-    """メンバーが話し始めたときに呼ばれるイベント (DiscordのVADに基づく)"""
-    if member.bot:
-        return
-    guild_id = member.guild.id
-    if guild_id in connections and connections[guild_id].is_currently_recording:
-        # VAD状態を更新し、必要な初期化を行う
-        if guild_id not in user_speaking_status:
-            user_speaking_status[guild_id] = {}
-        print(f"DEBUG: on_voice_member_speaking_start for {member.display_name}") # デバッグ用ログ
-        await realtime_voice_processor.handle_speaking_start(guild_id, member)
-
-@bot.event
-async def on_voice_member_speaking_stop(member: discord.Member):
-    """メンバーが話し終えたときに呼ばれるイベント (DiscordのVADに基づく)"""
-    if member.bot:
-        return
-    guild_id = member.guild.id
-    if guild_id in connections and connections[guild_id].is_currently_recording:
-        print(f"DEBUG: on_voice_member_speaking_stop for {member.display_name}") # デバッグ用ログ
-        await realtime_voice_processor.handle_speaking_stop(guild_id, member)
-
-
+# Botコマンド
 @bot.command()
 async def join(ctx):
-    """ボットをボイスチャンネルに接続し、リアルタイム音声録音・転写を開始"""
+    """ボットをボイスチャンネルに接続"""
     if ctx.author.voice is None:
         await ctx.send("❌ ボイスチャンネルに接続してください。")
         return
@@ -436,215 +417,85 @@ async def join(ctx):
     
     # 既存の接続があれば切断
     if ctx.guild.id in connections:
-        old_vc = connections[ctx.guild.id]
-        if hasattr(old_vc, 'is_currently_recording') and old_vc.is_currently_recording:
-            old_vc.is_currently_recording = False # 既存の録音を停止
-            
-            # 既存の定期文字起こしループを停止
-            realtime_voice_processor.stop_periodic_transcription_loop(ctx.guild.id)
-
-            # 録音中のユーザーがいれば、その時点までの音声を処理して停止
-            current_guild_buffers = list(realtime_audio_buffers.get(ctx.guild.id, {}).keys())
-            for user_id_in_buffer in current_guild_buffers:
-                user_in_buffer = bot.get_user(user_id_in_buffer) or ctx.guild.get_member(user_id_in_buffer)
-                if user_in_buffer:
-                    await _process_user_remaining_audio(ctx.guild.id, user_in_buffer, ctx.channel)
-            
-            realtime_audio_buffers.pop(ctx.guild.id, None) # バッファをクリア
-            user_speaking_status.pop(ctx.guild.id, None) # 状態をクリア
-            for user_id, task in list(transcription_tasks.get(ctx.guild.id, {}).items()):
-                if not task.done():
-                    print(f"未完了の転写タスクをキャンセル: {user_id}")
-                    task.cancel() # タスクをキャンセル
-            transcription_tasks.pop(ctx.guild.id, None)
-
-        await old_vc.disconnect()
+        await connections[ctx.guild.id].disconnect()
+        voice_processor.stop_processing(ctx.guild.id)
         del connections[ctx.guild.id]
-        await asyncio.sleep(0.5) # 切断処理が完全に終わるのを待つ
+        await asyncio.sleep(0.5)
 
     # VoiceRecvClient を使用して接続
-    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True) 
+    vc = await voice_channel.connect(cls=VoiceRecvClient, reconnect=True)
     connections[ctx.guild.id] = vc
-    vc.is_currently_recording = True # 録音開始フラグをTrueに設定
 
-    # カスタムシンクをVoiceRecvClient.listen()に渡す
-    vc.listen(AudioRecordingSink(realtime_voice_processor, ctx.guild.id))
-    print(f"🔊 VoiceRecvClient listening with AudioRecordingSink for Guild {ctx.guild.id}.")
-
-    # 定期文字起こしループを開始
-    realtime_voice_processor.start_periodic_transcription_loop(ctx.guild.id, ctx.channel)
+    # 音声シンクを設定
+    vc.listen(OptimizedAudioSink(voice_processor, ctx.guild.id))
+    
+    # リアルタイム処理を開始
+    voice_processor.start_processing(ctx.guild.id, ctx.channel)
 
     await ctx.send(f'🎵 ボイスチャンネル **{voice_channel.name}** に接続しました！')
-    print(f'Botがボイスチャンネル {voice_channel.name} に接続しました。')
-
-    if not realtime_voice_processor.stt_handler or realtime_voice_processor.stt_handler.whisper_model is None:
-        await ctx.send("⚠️ Whisperモデルがロードされていません。STT機能は利用できません。Botのログを確認してください。")
-        print("Whisperモデルがロードされていないため、VAD機能なしで録音を開始します。")
-    
     await ctx.send(
-        f"🎙️ **リアルタイム音声監視・転写を開始しました！**\n"
-        f"📁 ファイル保存先: `{AUDIO_OUTPUT_DIR}`\n"
-        f"🤖 STT: {'✅ ローカルWhisper' if realtime_voice_processor.stt_handler and realtime_voice_processor.stt_handler.whisper_model else '❌ なし'}\n"
+        f"🎙️ **リアルタイム音声文字起こしを開始しました！**\n"
+        f"⚡ 処理間隔: {REALTIME_CHUNK_DURATION_MS}ms\n"
+        f"🎯 VAD感度: {VAD_AGGRESSIVENESS}/3\n"
+        f"🔊 音声検出閾値: {SILENCE_THRESHOLD_MS}ms\n"
         f"ℹ️ `!leave` で接続を切断できます。"
     )
-    print("リアルタイム音声監視開始。")
 
-@bot.command()
-async def stop(ctx):
-    """
-    リアルタイム音声監視を一時停止し、バッファ中の音声データを処理します。
-    ボイスチャンネルからの切断は行いません。
-    """
-    if ctx.guild.id not in connections:
-        await ctx.send("❌ ボイスチャンネルに接続していません。")
-        return
-    
-    vc = connections[ctx.guild.id]
-    if hasattr(vc, 'is_currently_recording') and vc.is_currently_recording:
-        vc.is_currently_recording = False # 録音停止フラグ
-        
-        # 定期文字起こしループを停止
-        realtime_voice_processor.stop_periodic_transcription_loop(ctx.guild.id)
-
-        await ctx.send("⏸️ リアルタイム音声監視を一時停止しました。")
-        print("リアルタイム音声監視を一時停止しました。")
-        
-        # 現在バッファリング中の音声があればここで処理
-        current_guild_buffers = list(realtime_audio_buffers.get(ctx.guild.id, {}).keys())
-        for user_id_in_buffer in current_guild_buffers:
-            user_in_buffer = bot.get_user(user_id_in_buffer) or ctx.guild.get_member(user_id_in_buffer)
-            if user_in_buffer:
-                await _process_user_remaining_audio(ctx.guild.id, user_in_buffer, ctx.channel)
-        
-        realtime_audio_buffers.pop(ctx.guild.id, None) # バッファをクリア
-        user_speaking_status.pop(ctx.guild.id, None) # 状態をクリア
-        for user_id, task in list(transcription_tasks.get(ctx.guild.id, {}).items()):
-            if not task.done():
-                print(f"未完了の転写タスクをキャンセル: {user_id}")
-                task.cancel()
-        transcription_tasks[ctx.guild.id].clear()
-        await ctx.send("✅ 残りの音声処理を完了しました。")
-    else:
-        await ctx.send("❌ 現在、リアルタイム音声監視は行われていません。")
 
 @bot.command()
 async def leave(ctx):
-    """ボイスチャンネルから切断し、リアルタイム音声録音を停止"""
+    """ボイスチャンネルから切断"""
+    if ctx.guild.id not in connections:
+        await ctx.send("❌ ボイスチャンネルに接続していません。")
+        return
+    
+    voice_processor.stop_processing(ctx.guild.id)
+    await connections[ctx.guild.id].disconnect()
+    del connections[ctx.guild.id]
+    await ctx.send("👋 ボイスチャンネルから切断しました。")
+
+
+@bot.command()
+async def status(ctx):
+    """現在の状況を確認"""
     if ctx.guild.id not in connections:
         await ctx.send("❌ ボイスチャンネルに接続していません。")
         return
     
     vc = connections[ctx.guild.id]
+    channel_members = len(vc.channel.members) - 1
     
-    # 録音中のユーザーがいれば、その時点までの音声を処理して停止
-    if hasattr(vc, 'is_currently_recording') and vc.is_currently_recording:
-        vc.is_currently_recording = False
-        
-        # 定期文字起こしループを停止
-        realtime_voice_processor.stop_periodic_transcription_loop(ctx.guild.id)
-
-        await ctx.send("🛑 リアルタイム音声監視を停止してボイスチャンネルから切断します...")
-        
-        current_guild_buffers = list(realtime_audio_buffers.get(ctx.guild.id, {}).keys())
-        for user_id_in_buffer in current_guild_buffers:
-            user_in_buffer = bot.get_user(user_id_in_buffer) or ctx.guild.get_member(user_id_in_buffer)
-            if user_in_buffer:
-                await _process_user_remaining_audio(ctx.guild.id, user_in_buffer, ctx.channel)
-        
-        realtime_audio_buffers.pop(ctx.guild.id, None) # バッファをクリア
-        user_speaking_status.pop(ctx.guild.id, None) # 状態をクリア
-
-        # 実行中の転写タスクがあれば待機またはキャンセル
-        if ctx.guild.id in transcription_tasks:
-            # list() でコピーすることで、タスク完了時に辞書が変更されてもエラーにならない
-            for user_id, task in list(transcription_tasks[ctx.guild.id].items()):
-                if not task.done():
-                    print(f"未完了の転写タスクを待機: {user_id}")
-                    try:
-                        await asyncio.wait_for(task, timeout=10.0) # 10秒待機
-                    except asyncio.TimeoutError:
-                        print(f"転写タスク {user_id} がタイムアウトしました。キャンセルします。")
-                        task.cancel()
-            transcription_tasks.pop(ctx.guild.id, None)
-
-    await vc.disconnect()
-    if ctx.guild.id in connections:
-        del connections[ctx.guild.id]
-    await ctx.send("👋 ボイスチャンネルから切断しました。")
-    print('Botがボイスチャンネルから切断しました。')
+    status_msg = f"📊 **リアルタイム文字起こし稼働中**\n"
+    status_msg += f"🎤 チャンネル参加者: {channel_members}人\n"
+    status_msg += f"⚡ 処理間隔: {REALTIME_CHUNK_DURATION_MS}ms\n"
+    status_msg += f"🎯 VAD感度: {VAD_AGGRESSIVENESS}/3\n"
+    status_msg += f"🔊 無音閾値: {SILENCE_THRESHOLD_MS}ms"
+    
+    await ctx.send(status_msg)
 
 
 @bot.event
 async def on_ready():
-    """BotがDiscordに接続したときに呼ばれるイベント"""
+    """Bot起動時の初期化"""
     print(f'{bot.user} がDiscordに接続しました！')
-    print(f'Bot ID: {bot.user.id}')
-    global WHISPER_MODEL
-    try:
-        print(f"Whisperモデル ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE}) をロード中...")
-        WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
-        print("Whisperモデルのロードが完了しました。")
-        # モデルがロードされたらSTTハンドラーとVoiceDataProcessorを再初期化
-        realtime_voice_processor.stt_handler = SpeechToTextHandler(WHISPER_MODEL)
-    except Exception as e:
-        print(f"Whisperモデルのロードに失敗しました: {e}")
-        WHISPER_MODEL = None
-    print(f'利用可能なSTT: {"✅ ローカルWhisper" if WHISPER_MODEL else "❌ なし"}')
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    """ユーザーのボイスチャンネル状態更新イベント"""
-    if member == bot.user:
-        return
-
-    # Botが接続しているボイスチャンネルにユーザーが参加/退出した場合を検知
-    # (connections辞書でBotが接続中のギルドを追跡)
-    if member.guild.id in connections:
-        vc = connections[member.guild.id]
-        if vc.channel == before.channel and vc.channel != after.channel:
-            print(f'{member.display_name} が {before.channel.name} から退出しました。')
-        elif vc.channel != before.channel and vc.channel == after.channel:
-            print(f'{member.display_name} が {after.channel.name} に参加しました。')
-
-@bot.command()
-async def hello(ctx):
-    """シンプルなテストコマンド"""
-    await ctx.send(f'こんにちは、{ctx.author.display_name}さん！')
-
-@bot.command()
-async def register_voice(ctx):
-    """ユーザーの音声プロファイルを登録（将来の話者識別用）"""
-    # この機能は高度な話者識別アルゴリズムの実装が必要です。
-    # 現在のコードではDiscordユーザーIDを話者として利用しています。
-    await ctx.send("🎤 このコマンドは、高度な話者識別機能が実装された際に利用できます。")
-
-@bot.command()
-async def status(ctx):
-    """現在の録音状況を確認"""
-    if ctx.guild.id not in connections:
-        await ctx.send("❌ ボイスチャンネルに接続していません。")
-        return
     
-    vc = connections[ctx.guild.id]
-    # カスタムフラグで録音中か確認
-    if hasattr(vc, 'is_currently_recording') and vc.is_currently_recording:
-        channel_members = len(vc.channel.members) - 1  # Bot自身を除く
-        await ctx.send(f"📊 録音中です。チャンネル内のメンバー数: {channel_members}人。")
-    else:
-        await ctx.send("⏸️ 現在録音していません。")
+    global WHISPER_MODEL, transcription_engine, voice_processor
+    try:
+        print(f"Whisperモデル ({WHISPER_MODEL_SIZE}) をロード中...")
+        WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+        print("✅ Whisperモデルのロードが完了しました。")
+        
+        # エンジンとプロセッサーを初期化
+        transcription_engine = RealtimeTranscriptionEngine(WHISPER_MODEL, AUDIO_OUTPUT_DIR)
+        voice_processor = RealtimeVoiceProcessor(transcription_engine)
+        
+        print("✅ リアルタイム文字起こしシステムの初期化が完了しました。")
+    except Exception as e:
+        print(f"❌ Whisperモデルのロードに失敗しました: {e}")
 
-@bot.command()
-async def test_stt(ctx):
-    """STT機能の接続テスト"""
-    if WHISPER_MODEL:
-        await ctx.send(f"✅ ローカルWhisperモデル ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE}) 設定済み - STT機能が利用可能です。")
-    else:
-        await ctx.send("❌ STT機能が利用できません。Whisperモデルのロードに失敗している可能性があります。")
 
 # Botの実行
 if DISCORD_BOT_TOKEN:
     bot.run(DISCORD_BOT_TOKEN)
 else:
-    print("エラー: Discord Botトークンが設定されていません。'.env'ファイルを確認してください。")
-
+    print("エラー: Discord Botトークンが設定されていません。")
