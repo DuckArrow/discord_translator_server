@@ -17,6 +17,7 @@ from faster_whisper import WhisperModel
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
 from discord.ext.voice_recv import AudioSink # AudioSinkをインポートします
+from discord.ext.voice_recv import VoiceData # VoiceDataの型ヒントのためにインポート
 
 
 # ★★★ 追加: discord.py の詳細ロギングを有効にする ★★★
@@ -278,7 +279,7 @@ class AudioRecordingSink(AudioSink): # AudioSinkを継承
         self.processor = processor
         self.guild_id = guild_id
         
-    def write(self, user: discord.Member, data: bytes):
+    def write(self, user: discord.Member, data: VoiceData): # 型ヒントをVoiceDataに変更
         """
         ユーザーからのデコード済み音声データ（PCMバイトデータ）を受信し、バッファリングします。
         """
@@ -291,9 +292,9 @@ class AudioRecordingSink(AudioSink): # AudioSinkを継承
         if user.id not in realtime_audio_buffers[self.guild_id]:
             realtime_audio_buffers[self.guild_id][user.id] = bytearray()
         
-        # 受信したPCMデータをユーザーのバッファに追加
-        realtime_audio_buffers[self.guild_id][user.id].extend(data)
-        print(f"DEBUG Sink: Received {len(data)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}") # デバッグ用に一時的に有効化
+        # ★★★ 修正箇所: data.pcm を使用する ★★★
+        realtime_audio_buffers[self.guild_id][user.id].extend(data.pcm)
+        print(f"DEBUG Sink: Received {len(data.pcm)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}") # デバッグ用に一時的に有効化
 
     def flush(self, user: discord.Member):
         """
@@ -303,12 +304,10 @@ class AudioRecordingSink(AudioSink): # AudioSinkを継承
         print(f"DEBUG Sink: flush method called for {user.display_name}")
         pass # ここでは何もしない (on_voice_member_speaking_stop で処理)
 
-    # ★★★ 修正箇所: @property を削除し、通常のメソッドにする ★★★
     def wants_opus(self) -> bool:
         """シンクがOpus形式の音声データを希望するかどうかを返します。"""
         # faster-whisperはPCMデータを必要とするため、Falseを返します。
         return False 
-    # ★★★ 修正ここまで ★★★
 
     def cleanup(self):
         """シンクが破棄される際に呼び出されるクリーンアップメソッドです。"""
