@@ -16,8 +16,8 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# ★★★ 修正箇所: カスタムシンクの基底クラスを正しいパスからインポート ★★★
-from discord.ext.voice_recv import BaseSink
+# ★★★ 修正箇所: BaseSinkのインポートを削除 ★★★
+# from discord.ext.voice_recv import BaseSink
 # ★★★ 修正ここまで ★★★
 
 
@@ -270,13 +270,14 @@ class RealtimeVoiceDataProcessor:
 realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
 
 # 音声データを受け取るカスタムシンククラス
-class AudioRecordingSink(BaseSink):
+# ★★★ 修正箇所: BaseSinkを継承しない（ダックタイピング） ★★★
+class AudioRecordingSink: # BaseSinkを削除
     """
     discord-ext-voice-recv の音声データを受け取るカスタムシンク。
     PCMデータをバッファリングし、RealtimeVoiceDataProcessorに渡します。
     """
     def __init__(self, processor: RealtimeVoiceDataProcessor, guild_id: int):
-        super().__init__() # BaseSinkのコンストラクタを呼び出す
+        # super().__init__() # BaseSinkを継承しないので不要
         self.processor = processor
         self.guild_id = guild_id
         
@@ -284,8 +285,6 @@ class AudioRecordingSink(BaseSink):
         """
         ユーザーからのデコード済み音声データ（PCMバイトデータ）を受信し、バッファリングします。
         """
-        # print(f"DEBUG Sink: write method called for {user.display_name}") # 高頻度で出力されるためコメントアウト
-
         if user.bot:
             return
 
@@ -306,6 +305,7 @@ class AudioRecordingSink(BaseSink):
         """
         print(f"DEBUG Sink: flush method called for {user.display_name}")
         pass # ここでは何もしない (on_voice_member_speaking_stop で処理)
+# ★★★ 修正ここまで ★★★
 
 
 @bot.event
