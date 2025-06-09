@@ -16,9 +16,7 @@ from faster_whisper import WhisperModel
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
-# ★★★ 修正箇所: AudioSinkをインポート ★★★
 from discord.ext.voice_recv import AudioSink # AudioSinkをインポートします
-# ★★★ 修正ここまで ★★★
 
 
 # ★★★ 追加: discord.py の詳細ロギングを有効にする ★★★
@@ -270,7 +268,6 @@ class RealtimeVoiceDataProcessor:
 realtime_voice_processor = RealtimeVoiceDataProcessor(AUDIO_OUTPUT_DIR, SpeechToTextHandler(None))
 
 # 音声データを受け取るカスタムシンククラス
-# ★★★ 修正箇所: AudioSinkを継承する ★★★
 class AudioRecordingSink(AudioSink): # AudioSinkを継承
     """
     discord-ext-voice-recv の音声データを受け取るカスタムシンク。
@@ -305,7 +302,20 @@ class AudioRecordingSink(AudioSink): # AudioSinkを継承
         """
         print(f"DEBUG Sink: flush method called for {user.display_name}")
         pass # ここでは何もしない (on_voice_member_speaking_stop で処理)
-# ★★★ 修正ここまで ★★★
+
+    # ★★★ 追加: AudioSinkの抽象メソッドを実装 ★★★
+    @property
+    def wants_opus(self) -> bool:
+        """シンクがOpus形式の音声データを希望するかどうかを返します。"""
+        # faster-whisperはPCMデータを必要とするため、Falseを返します。
+        return False 
+
+    def cleanup(self):
+        """シンクが破棄される際に呼び出されるクリーンアップメソッドです。"""
+        # ここでは特にクリーンアップするリソースがないため、passとします。
+        print("DEBUG Sink: cleanup method called.")
+        pass
+    # ★★★ 追加ここまで ★★★
 
 
 @bot.event
