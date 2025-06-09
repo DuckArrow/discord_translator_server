@@ -88,8 +88,9 @@ class SpeechToTextHandler:
     def __init__(self, whisper_model: WhisperModel):
         self.whisper_model = whisper_model
 
-    async def transcribe_with_local_whisper(self, audio_file_path: str) -> Optional[str]:
-        """faster-whisper を使用してローカルで音声をテキストに変換"""
+    # transcribe_with_local_whisper は同期処理として定義し、呼び出し側でto_threadを使う
+    def transcribe_with_local_whisper_sync(self, audio_file_path: str) -> Optional[str]:
+        """faster-whisper を使用してローカルで音声をテキストに変換 (同期版)"""
         if self.whisper_model is None:
             print("Whisper モデルがロードされていません。")
             return None
@@ -116,6 +117,13 @@ class SpeechToTextHandler:
         except Exception as e:
             print(f"ローカルWhisper音声転写エラー: {e}")
             return None
+
+    # 非同期版のtranscribeメソッド (to_threadで同期版をラップする)
+    async def transcribe_with_local_whisper(self, audio_file_path: str) -> Optional[str]:
+        """faster-whisper を使用してローカルで音声をテキストに変換 (非同期ラッパー)"""
+        # 重い処理を別のスレッドで実行し、メインイベントループをブロックしない
+        return await asyncio.to_thread(self.transcribe_with_local_whisper_sync, audio_file_path)
+
 
     @staticmethod
     async def transcribe_with_google(audio_file_path: str) -> Optional[str]:
@@ -208,6 +216,7 @@ class RealtimeVoiceDataProcessor:
 
         transcription = None
         if temp_audio_path:
+            # transcribe_with_local_whisper はすでにasyncio.to_threadを使用するように変更されている
             transcription = await self.stt_handler.transcribe_with_local_whisper(temp_audio_path)
             try:
                 os.remove(temp_audio_path)
@@ -292,8 +301,7 @@ class AudioRecordingSink(AudioSink): # AudioSinkを継承
         if user.id not in realtime_audio_buffers[self.guild_id]:
             realtime_audio_buffers[self.guild_id][user.id] = bytearray()
         
-        # ★★★ 修正箇所: data.pcm を使用する ★★★
-        realtime_audio_buffers[self.guild_id][user.id].extend(data.pcm)
+        realtime_audio_buffers[self.guild_id][user.id].extend(data.pcm) # data.pcm を使用
         print(f"DEBUG Sink: Received {len(data.pcm)} bytes from {user.display_name}. Buffer size: {len(realtime_audio_buffers[self.guild_id][user.id])}") # デバッグ用に一時的に有効化
 
     def flush(self, user: discord.Member):
