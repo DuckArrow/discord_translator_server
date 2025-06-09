@@ -82,7 +82,7 @@ WHISPER_DEVICE = "cpu" # GPUがある場合は "cuda" を試す
 WHISPER_COMPUTE_TYPE = "int8" # CPUの場合は "int8" が効率的
 
 # 文字起こしチャンクの長さ（秒単位）。これにより、何秒ごとに文字起こしを試みるかを決定
-TRANSCRIPTION_CHUNK_DURATION_SECONDS = 5
+TRANSCRIPTION_CHUNK_DURATION_SECONDS = 2 # ★★★ 5秒から2秒に変更 ★★★
 # PCMデータレート (48kHz, 16bit, stereo)
 PCM_SAMPLE_RATE = 48000
 PCM_BYTES_PER_SAMPLE = 2 # 16-bit
@@ -277,43 +277,42 @@ class RealtimeVoiceDataProcessor:
             if guild_id not in realtime_audio_buffers:
                 continue
 
-            for user_id, buffer in list(realtime_audio_buffers[guild_id].items()):
-                # 現在話しているユーザーで、チャンクサイズ以上のデータがある場合
-                if user_speaking_status.get(guild_id, {}).get(user_id, False) and len(buffer) >= TRANSCRIPTION_CHUNK_BYTES:
-                    # バッファからチャンクを抽出
-                    chunk_data = bytes(buffer[:TRANSCRIPTION_CHUNK_BYTES])
-                    # 処理した部分をバッファから削除
-                    realtime_audio_buffers[guild_id][user_id] = bytearray(buffer[TRANSCRIPTION_CHUNK_BYTES:])
+            # Iterate over a copy of items to allow modification during iteration
+            for user_id, current_buffer in list(realtime_audio_buffers[guild_id].items()):
+                user = bot.get_user(user_id) or text_channel.guild.get_member(user_id)
+                if not user:
+                    # User left or is no longer available, clean up their buffer
+                    realtime_audio_buffers[guild_id].pop(user_id, None)
+                    user_speaking_status[guild_id].pop(user_id, None)
+                    continue
 
-                    user = bot.get_user(user_id) or text_channel.guild.get_member(user_id)
-                    if user:
-                        print(f"DEBUG Periodic: Processing chunk for {user.display_name} (length: {len(chunk_data)} bytes)")
-                        asyncio.create_task(
-                            self._process_audio_chunk_and_transcribe(
-                                chunk_data,
-                                user.id,
-                                user.display_name,
-                                text_channel
-                            )
+                buffer_length = len(current_buffer)
+                is_speaking = user_speaking_status.get(guild_id, {}).get(user_id, False)
+
+                # ユーザーのバッファに文字起こしチャンクサイズ以上のデータがある場合
+                if buffer_length >= TRANSCRIPTION_CHUNK_BYTES:
+                    # チャンクを切り出し、処理
+                    chunk_to_process = bytes(current_buffer[:TRANSCRIPTION_CHUNK_BYTES])
+                    realtime_audio_buffers[guild_id][user_id] = bytearray(current_buffer[TRANSCRIPTION_CHUNK_BYTES:])
+                    
+                    print(f"DEBUG Periodic (Chunk): Processing chunk for {user.display_name} (length: {len(chunk_to_process)} bytes), Remaining buffer: {len(realtime_audio_buffers[guild_id][user_id])} bytes")
+                    asyncio.create_task(
+                        self._process_audio_chunk_and_transcribe(
+                            chunk_to_process, user.id, user.display_name, text_channel
                         )
-                # 話し終わったか、VADが発動していないが、一定量以上の音声が残っている場合（短い沈黙後など）
-                # NOTE: この条件は handle_speaking_stop でも処理されるため、重複する可能性あり
-                # しかし、handle_speaking_stop が呼ばれないケース（Botが先に切断されたなど）を考慮し、
-                # ある程度のサイズが残っている場合はここでも処理を試みる。
-                elif len(buffer) >= MIN_PROCESS_CHUNK_BYTES and not user_speaking_status.get(guild_id, {}).get(user_id, False):
-                    # 残りの全データを処理し、バッファをクリア
-                    print(f"DEBUG Periodic (Stopped/Leftover): Processing remaining chunk for {user.display_name} (length: {len(buffer)} bytes)")
-                    remaining_data = bytes(realtime_audio_buffers[guild_id].pop(user_id))
-                    user = bot.get_user(user_id) or text_channel.guild.get_member(user_id)
-                    if user and remaining_data:
-                        asyncio.create_task(
-                            self._process_audio_chunk_and_transcribe(
-                                remaining_data,
-                                user.id,
-                                user.display_name,
-                                text_channel
-                            )
+                    )
+                # ユーザーが話しておらず、かつバッファに最小処理チャンク以上のデータが残っている場合
+                # これは、短い発話の終わりや、VADがオフになった後に残ったデータに対応
+                elif not is_speaking and buffer_length >= MIN_PROCESS_CHUNK_BYTES:
+                    # 残っているデータを全て処理し、バッファをクリア
+                    chunk_to_process = bytes(realtime_audio_buffers[guild_id].pop(user_id))
+                    print(f"DEBUG Periodic (Stopped leftover): Processing remaining audio for {user.display_name} (length: {len(chunk_to_process)} bytes)")
+                    asyncio.create_task(
+                        self._process_audio_chunk_and_transcribe(
+                            chunk_to_process, user.id, user.display_name, text_channel
                         )
+                    )
+                # else: 非常に短いデータは、次回のチャンクに結合されるまで待機するか、最終的に `on_voice_member_speaking_stop` で処理される
 
     def start_periodic_transcription_loop(self, guild_id: int, text_channel: discord.TextChannel):
         """定期的な文字起こしループを開始"""
