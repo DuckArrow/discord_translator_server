@@ -210,9 +210,10 @@ class RealtimeTranscriptionEngine:
                         segments, info = self.whisper_model.transcribe(
                             temp_path,
                             language="ja",
-                            beam_size=1,  # 高速化のためビームサイズを1に
-                            vad_filter=True,
-                            # ★★★ no_speech_threshold を調整 ★★★
+                            # ★★★ beam_sizeを5に調整 ★★★
+                            beam_size=5,  # 高速化のためビームサイズを1に
+                            # ★★★ vad_filterをFalseに設定 (webrtcvadに任せる) ★★★
+                            vad_filter=False, # 無音部分のフィルタリングを有効にする
                             no_speech_threshold=0.2, # デフォルトに近い値で、より多くの音声を拾う
                             condition_on_previous_text=False  # 前のテキストに依存しない
                         )
@@ -426,13 +427,12 @@ class RealtimeVoiceProcessor:
                 if chunk:
                     print(f"DEBUG Processor: Periodic chunk generated for {buffer.username} ({len(chunk)} bytes). Submitting.")
                     self.transcription_engine.submit_audio(chunk, user_id, buffer.username, guild_id)
-                elif not buffer.is_speaking and len(buffer.accumulated_audio) > 0:
-                    # VADが音声なしと判断し、かつ残りのデータがまだ処理されていない場合
-                    # (これは、非常に短い発話の終端などで発生する可能性)
-                    remaining = buffer.get_remaining_audio()
-                    if remaining:
-                        print(f"DEBUG Processor: Periodic cleanup of remaining audio for {buffer.username} ({len(remaining)} bytes). Submitting.")
-                        self.transcription_engine.submit_audio(remaining, user_id, buffer.username, guild_id)
+                # ★★★ 修正箇所: このelifブロックを削除し、発話終了時の処理はprocess_audioに任せる ★★★
+                # elif not buffer.is_speaking and len(buffer.accumulated_audio) > 0:
+                #     remaining = buffer.get_remaining_audio()
+                #     if remaining:
+                #         print(f"DEBUG Processor: Periodic cleanup of remaining audio for {buffer.username} ({len(remaining)} bytes). Submitting.")
+                #         self.transcription_engine.submit_audio(remaining, user_id, buffer.username, guild_id)
                     
     async def _result_polling_loop(self, guild_id: int):
         """文字起こし結果キューを定期的にポーリングし、Discordに送信するループ"""
