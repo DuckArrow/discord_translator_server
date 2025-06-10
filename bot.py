@@ -26,10 +26,9 @@ from discord.ext.voice_recv import VoiceData # VoiceDataの型ヒントのため
 # VAD (Voice Activity Detection) 用
 import webrtcvad
 
-# ★★★ 新しい設定 ★★★
-# リアルタイム性向上のための設定
+# ★★★ 設定 ★★★
 REALTIME_CHUNK_DURATION_MS = 1200  # 1200ms（1.2秒）
-VAD_AGGRESSIVENESS = 0  # VADの感度を調整 (0-3, 0が最も寛容)
+VAD_AGGRESSIVENESS = 0  # WebRTC VADの感度を調整 (0-3, 0が最も寛容)
 MIN_SPEECH_DURATION_MS = 300  # 最小発話時間（300ms）
 SILENCE_THRESHOLD_MS = 1000 # 無音時間がこれを超えると発話終了とみなす
 OVERLAP_DURATION_MS = 200  # チャンク間のオーバーラップ
@@ -71,8 +70,9 @@ os.makedirs(DEBUG_AUDIO_SAVE_DIR, exist_ok=True) # Ensure directory exists
 connections: Dict[int, VoiceRecvClient] = {}
 
 # Whisperモデルのグローバル変数
+# ★★★ モデルサイズを "small" に変更 ★★★
 WHISPER_MODEL: Optional[WhisperModel] = None
-WHISPER_MODEL_SIZE = "base"
+WHISPER_MODEL_SIZE = "small" # 変更点: "base" -> "small"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 
@@ -224,10 +224,10 @@ class RealtimeTranscriptionEngine:
                         segments, info = self.whisper_model.transcribe(
                             temp_path,
                             language="ja",
-                            beam_size=5,  # ★★★ beam_sizeを5に再変更 ★★★
+                            beam_size=5,  # 精度を重視するためビームサイズ5
                             vad_filter=True, # WhisperのVADフィルターを有効に維持
-                            no_speech_threshold=0.5, # ★★★ no_speech_thresholdを0.5に調整 ★★★
-                            condition_on_previous_text=True  # ★★★ condition_on_previous_textをTrueに再変更 ★★★
+                            no_speech_threshold=0.5, # 精度とリアルタイム性のバランス
+                            condition_on_previous_text=True  # 精度を重視するため文脈依存を有効
                         )
                         
                         for segment in segments:
@@ -632,6 +632,7 @@ async def on_ready():
     global WHISPER_MODEL, transcription_engine, voice_processor
     try:
         print(f"Whisperモデル ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE}) をロード中...")
+        # WHISPER_MODEL_SIZE を "small" に変更したため、初回ロード時間が長くなります。
         WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
         print("✅ Whisperモデルのロードが完了しました。")
         
