@@ -27,10 +27,10 @@ import webrtcvad
 
 # ★★★ 新しい設定 ★★★
 # リアルタイム性向上のための設定
-REALTIME_CHUNK_DURATION_MS = 500  # 500ms（0.5秒）でチャンク処理
-VAD_AGGRESSIVENESS = 0  # ★★★ VADの感度を調整 (0-3, 0が最も寛容) ★★★
+REALTIME_CHUNK_DURATION_MS = 1000  # ★★★ 500msから1000ms（1秒）に延長 ★★★
+VAD_AGGRESSIVENESS = 0  # VADの感度を調整 (0-3, 0が最も寛容)
 MIN_SPEECH_DURATION_MS = 300  # 最小発話時間（300ms）
-SILENCE_THRESHOLD_MS = 800  # 無音時間がこれを超えると発話終了とみなす
+SILENCE_THRESHOLD_MS = 1000 # ★★★ 800msから1000msに延長 ★★★
 OVERLAP_DURATION_MS = 200  # チャンク間のオーバーラップ
 
 # 音声品質設定（16kHzに変更してWhisperの処理を高速化）
