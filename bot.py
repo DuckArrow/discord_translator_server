@@ -17,6 +17,9 @@ import shutil # ファイルコピー用
 
 # faster-whisperのインポート
 from faster_whisper import WhisperModel
+# トークンIDを取得するために必要
+from faster_whisper.tokenizer import Tokenizer
+# WhisperModelのローディング中に、トークナイザーが初期化されるため、これを遅延ロードする必要がある。
 
 # discord-ext-voice-recv の正しいインポート方法
 from discord.ext.voice_recv import VoiceRecvClient
@@ -70,12 +73,13 @@ os.makedirs(DEBUG_AUDIO_SAVE_DIR, exist_ok=True) # Ensure directory exists
 connections: Dict[int, VoiceRecvClient] = {}
 
 # Whisperモデルのグローバル変数
-# ★★★ モデルサイズを "small" に変更 ★★★
 WHISPER_MODEL: Optional[WhisperModel] = None
-WHISPER_MODEL_SIZE = "small" # 変更点: "base" -> "small"
+WHISPER_MODEL_SIZE = "small" 
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 
+# 抑制するトークンIDのリスト
+SUPPRESS_TOKEN_IDS: Optional[List[int]] = None
 
 class AudioUtils:
     """音声データ処理のユーティリティクラス"""
@@ -221,13 +225,21 @@ class RealtimeTranscriptionEngine:
                     # Whisperで文字起こし
                     transcription = ""
                     if self.whisper_model:
+                        # suppress_tokens を使用して特定のフレーズを抑制
+                        # Tokenizer はモデル初期化後に使用可能になる
+                        # 「ご視聴ありがとうございました」のトークンID
+                        suppress_tokens_for_phrase = []
+                        if SUPPRESS_TOKEN_IDS:
+                            suppress_tokens_for_phrase = SUPPRESS_TOKEN_IDS
+
                         segments, info = self.whisper_model.transcribe(
                             temp_path,
                             language="ja",
                             beam_size=5,  # 精度を重視するためビームサイズ5
                             vad_filter=True, # WhisperのVADフィルターを有効に維持
                             no_speech_threshold=0.5, # 精度とリアルタイム性のバランス
-                            condition_on_previous_text=True  # 精度を重視するため文脈依存を有効
+                            condition_on_previous_text=True,  # 精度を重視するため文脈依存を有効
+                            suppress_tokens=suppress_tokens_for_phrase # ★★★ 抑制するトークンIDを渡す ★★★
                         )
                         
                         for segment in segments:
@@ -629,13 +641,57 @@ async def on_ready():
     """Bot起動時の初期化"""
     print(f'{bot.user} がDiscordに接続しました！')
     
-    global WHISPER_MODEL, transcription_engine, voice_processor
+    global WHISPER_MODEL, transcription_engine, voice_processor, SUPPRESS_TOKEN_IDS
     try:
         print(f"Whisperモデル ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE}, {WHISPER_COMPUTE_TYPE}) をロード中...")
-        # WHISPER_MODEL_SIZE を "small" に変更したため、初回ロード時間が長くなります。
         WHISPER_MODEL = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
         print("✅ Whisperモデルのロードが完了しました。")
         
+        # トークナイザーを初期化し、抑制するトークンIDを取得
+        # WhisperModelの内部にあるtokenizerを使用します
+        if WHISPER_MODEL and WHISPER_MODEL.model.tokenizer:
+            # 日本語のトークナイザーを取得
+            tokenizer = Tokenizer(WHISPER_MODEL.model.tokenizer.all_language_codes, WHISPER_MODEL.model.tokenizer.language, WHISPER_MODEL.model.tokenizer.sot_token, WHISPER_MODEL.model.tokenizer.special_tokens)
+            # 「ご視聴ありがとうございました」のトークンID
+            # このフレーズをエンコードしてトークンIDを取得
+            phrase_to_suppress = "ご視聴ありがとうございました"
+            # 空文字列をエンコードすると[50257]（<|endoftext|>）が返される可能性があるため、特別な対応は不要。
+            # トークナイザーのencodeメソッドは、単語レベルでトークンIDのリストを返します。
+            # 通常のテキストをエンコードするだけなので、特別なトークン追加などは不要です。
+            
+            # トークナイザの`encode`メソッドは、モデルの内部辞書に基づいて動作します。
+            # 直接Tokenizerクラスのインスタンスを生成して使用するより、
+            # WHISPER_MODEL.hf_tokenizer を使う方が適切です。
+            
+            # smallモデルのtokenizerは`hf_tokenizer`属性でアクセスできます
+            # `generate_suppress_tokens` メソッドは、言語とトークンIDを引数にとります。
+            # 日本語のモデルでは日本語のトークンIDを使用します。
+            
+            # 50358: <|startofprev|>
+            # 50359: <|endoftranscript|>
+            # 50360: <|no_timestamps|>
+            
+            # Whisperのトークン辞書に存在する文字列であればトークンIDに変換されます。
+            # 日本語のフレーズは複数のトークンに分割される場合があります。
+            
+            # generate_suppress_tokens は内部で使用されるメソッドなので、
+            # 直接トークナイザーの encode メソッドで文字列をトークンIDに変換します。
+            
+            # `sot_token` (start of transcription), `eot_token` (end of transcription)などを除外
+            # `pad_token`, `end_of_text_token` などもデフォルトで抑制されます。
+            
+            # まず、抑制したいフレーズをエンコードしてトークンIDのリストを取得
+            ids_to_suppress = WHISPER_MODEL.model.tokenizer.encode(phrase_to_suppress)
+            
+            # デフォルトで抑制される特殊トークンは含めず、純粋にフレーズのトークンIDのみを追加
+            SUPPRESS_TOKEN_IDS = WHISPER_MODEL.model.tokenizer.sot_sequence_tokens + ids_to_suppress
+            
+            print(f"「{phrase_to_suppress}」のトークンID: {ids_to_suppress}")
+            print(f"抑制される全てのトークンID: {SUPPRESS_TOKEN_IDS}")
+        else:
+            print("WARNING: Whisperモデルのトークナイザーが利用できません。suppress_tokensは適用されません。")
+
+
         # エンジンとプロセッサーを初期化
         transcription_engine = RealtimeTranscriptionEngine(WHISPER_MODEL, AUDIO_OUTPUT_DIR)
         voice_processor = RealtimeVoiceProcessor(transcription_engine)
