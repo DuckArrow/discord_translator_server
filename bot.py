@@ -492,7 +492,10 @@ class OptimizedAudioSink(AudioSink):
                 user.display_name, 
                 data.pcm
             )
-            print(f"DEBUG OptimizedAudioSink: User {user.display_name} received {len(data.pcm)} bytes. Total in buffer: {len(self.processor.audio_buffers.get(self.guild_id, {}).get(user.id, bytearray()))} bytes.")
+            # ★★★ 修正箇所: StreamingAudioBuffer オブジェクトの accumulated_audio の長さを参照 ★★★
+            current_user_buffer = self.processor.audio_buffers.get(self.guild_id, {}).get(user.id)
+            buffer_len = len(current_user_buffer.accumulated_audio) if current_user_buffer else 0
+            print(f"DEBUG OptimizedAudioSink: User {user.display_name} received {len(data.pcm)} bytes. Total in buffer: {buffer_len} bytes.")
         else:
             print("WARNING: RealtimeVoiceProcessor is not initialized.")
     
