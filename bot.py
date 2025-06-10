@@ -27,10 +27,10 @@ import webrtcvad
 
 # ★★★ 新しい設定 ★★★
 # リアルタイム性向上のための設定
-REALTIME_CHUNK_DURATION_MS = 1000  # ★★★ 2000msから1000ms（1秒）に再変更 ★★★
+REALTIME_CHUNK_DURATION_MS = 1000  # 1000ms（1秒）
 VAD_AGGRESSIVENESS = 0  # VADの感度を調整 (0-3, 0が最も寛容)
 MIN_SPEECH_DURATION_MS = 300  # 最小発話時間（300ms）
-SILENCE_THRESHOLD_MS = 1000 # ★★★ 2000msから1000msに再変更 ★★★
+SILENCE_THRESHOLD_MS = 1000 # 無音時間がこれを超えると発話終了とみなす
 OVERLAP_DURATION_MS = 200  # チャンク間のオーバーラップ
 
 # 音声品質設定（16kHzに変更してWhisperの処理を高速化）
@@ -211,10 +211,11 @@ class RealtimeTranscriptionEngine:
                             temp_path,
                             language="ja",
                             beam_size=5,
-                            # ★★★ vad_filterをTrueに再設定 ★★★
-                            vad_filter=True, # 無音部分のフィルタリングを有効にする
-                            no_speech_threshold=0.2, # デフォルトに近い値で、より多くの音声を拾う
-                            condition_on_previous_text=False  # 前のテキストに依存しない
+                            # ★★★ vad_filterをFalseに再変更 ★★★
+                            vad_filter=False, # 無音部分のフィルタリングを無効にする
+                            # ★★★ condition_on_previous_textをTrueに設定 ★★★
+                            condition_on_previous_text=True, # 前のテキストに依存する
+                            no_speech_threshold=0.3 # VAD無効化時に、より積極的に文字起こしを試みる
                         )
                         
                         for segment in segments:
