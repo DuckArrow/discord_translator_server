@@ -27,10 +27,10 @@ import webrtcvad
 
 # ★★★ 新しい設定 ★★★
 # リアルタイム性向上のための設定
-REALTIME_CHUNK_DURATION_MS = 1000  # ★★★ 500msから1000ms（1秒）に延長 ★★★
+REALTIME_CHUNK_DURATION_MS = 1000  # ★★★ 2000msから1000ms（1秒）に再変更 ★★★
 VAD_AGGRESSIVENESS = 0  # VADの感度を調整 (0-3, 0が最も寛容)
 MIN_SPEECH_DURATION_MS = 300  # 最小発話時間（300ms）
-SILENCE_THRESHOLD_MS = 1000 # ★★★ 800msから1000msに延長 ★★★
+SILENCE_THRESHOLD_MS = 1000 # ★★★ 2000msから1000msに再変更 ★★★
 OVERLAP_DURATION_MS = 200  # チャンク間のオーバーラップ
 
 # 音声品質設定（16kHzに変更してWhisperの処理を高速化）
@@ -210,10 +210,9 @@ class RealtimeTranscriptionEngine:
                         segments, info = self.whisper_model.transcribe(
                             temp_path,
                             language="ja",
-                            # ★★★ beam_sizeを5に調整 ★★★
-                            beam_size=5,  # 高速化のためビームサイズを1に
-                            # ★★★ vad_filterをFalseに設定 (webrtcvadに任せる) ★★★
-                            vad_filter=False, # 無音部分のフィルタリングを有効にする
+                            beam_size=5,
+                            # ★★★ vad_filterをTrueに再設定 ★★★
+                            vad_filter=True, # 無音部分のフィルタリングを有効にする
                             no_speech_threshold=0.2, # デフォルトに近い値で、より多くの音声を拾う
                             condition_on_previous_text=False  # 前のテキストに依存しない
                         )
@@ -271,7 +270,7 @@ class StreamingAudioBuffer:
             audio_data, PCM_SAMPLE_RATE, WHISPER_SAMPLE_RATE
         )
         
-        # ★★★ 修正箇所: VAD判定にかかわらず、常に音声データをバッファに蓄積する ★★★
+        # VAD判定にかかわらず、常に音声データをバッファに蓄積する
         self.accumulated_audio.extend(resampled_audio) 
 
         # VADで音声活動を検出
@@ -427,12 +426,7 @@ class RealtimeVoiceProcessor:
                 if chunk:
                     print(f"DEBUG Processor: Periodic chunk generated for {buffer.username} ({len(chunk)} bytes). Submitting.")
                     self.transcription_engine.submit_audio(chunk, user_id, buffer.username, guild_id)
-                # ★★★ 修正箇所: このelifブロックを削除し、発話終了時の処理はprocess_audioに任せる ★★★
-                # elif not buffer.is_speaking and len(buffer.accumulated_audio) > 0:
-                #     remaining = buffer.get_remaining_audio()
-                #     if remaining:
-                #         print(f"DEBUG Processor: Periodic cleanup of remaining audio for {buffer.username} ({len(remaining)} bytes). Submitting.")
-                #         self.transcription_engine.submit_audio(remaining, user_id, buffer.username, guild_id)
+                # 発話終了時の処理はprocess_audioに任せるため、このelifブロックは不要
                     
     async def _result_polling_loop(self, guild_id: int):
         """文字起こし結果キューを定期的にポーリングし、Discordに送信するループ"""
@@ -482,7 +476,7 @@ class OptimizedAudioSink(AudioSink):
                 user.display_name, 
                 data.pcm
             )
-            # ★★★ 修正箇所: StreamingAudioBuffer オブジェクトの accumulated_audio の長さを参照 ★★★
+            # StreamingAudioBuffer オブジェクトの accumulated_audio の長さを参照
             current_user_buffer = self.processor.audio_buffers.get(self.guild_id, {}).get(user.id)
             buffer_len = len(current_user_buffer.accumulated_audio) if current_user_buffer else 0
             print(f"DEBUG OptimizedAudioSink: User {user.display_name} received {len(data.pcm)} bytes. Total in buffer: {buffer_len} bytes.")
