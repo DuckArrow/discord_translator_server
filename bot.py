@@ -270,6 +270,9 @@ class StreamingAudioBuffer:
             audio_data, PCM_SAMPLE_RATE, WHISPER_SAMPLE_RATE
         )
         
+        # ★★★ 修正箇所: VAD判定にかかわらず、常に音声データをバッファに蓄積する ★★★
+        self.accumulated_audio.extend(resampled_audio) 
+
         # VADで音声活動を検出
         has_speech = AudioUtils.apply_vad(resampled_audio, WHISPER_SAMPLE_RATE, VAD_AGGRESSIVENESS)
         
@@ -278,30 +281,18 @@ class StreamingAudioBuffer:
             if not self.is_speaking:
                 print(f"DEBUG Buffer: {self.username} -> Speech START detected.")
             self.is_speaking = True
-            self.accumulated_audio.extend(resampled_audio)
         else:
             # 無音時間が閾値を超えた場合、発話終了とみなす
             if self.is_speaking and (current_time - self.last_speech_time) > (SILENCE_THRESHOLD_MS / 1000):
-                if len(self.accumulated_audio) > 0:
+                # Only signal speech end if there's actual accumulated audio to process
+                if len(self.accumulated_audio) > 0: # Ensures we don't signal end on empty buffer
                     print(f"DEBUG Buffer: {self.username} -> Speech END detected. Accumulated audio length: {len(self.accumulated_audio)} bytes.")
                     self.is_speaking = False
                     return True  # 発話終了を示す
                 else:
-                    # 無音でバッファも空なら、単にVADが音声なしと判断しただけ
-                    print(f"DEBUG Buffer: {self.username} -> No speech, buffer empty.")
-                    self.is_speaking = False # 念のためフラグをFalseに
-            elif self.is_speaking:
-                # まだ発話中の場合は無音部分も含める
-                # (VADが一時的に無音と判断したが、まだSILENCE_THRESHOLD_MSに達していない場合)
-                self.accumulated_audio.extend(resampled_audio)
-                # print(f"DEBUG Buffer: {self.username} -> No speech, but still accumulating (buffer: {len(self.accumulated_audio)}).")
-            else:
-                # 完全に無音で、かつ発話中ではない
-                if len(self.accumulated_audio) > 0:
-                    # 無音だがバッファにデータが残っている場合、まだチャンク処理されていない可能性あり
-                    print(f"DEBUG Buffer: {self.username} -> Not speaking, but buffer has {len(self.accumulated_audio)} bytes. Waiting for chunk processing or final cleanup.")
-                else:
-                    pass # 何もしない
+                    self.is_speaking = False # No speech and buffer empty, so stop speaking
+            # VADが一時的に無音と判断しても、SILENCE_THRESHOLD_MSに達していなければis_speakingはTrueのまま
+            # また、音声データは既にaccumulated_audioに追加済み
         
         return False
     
@@ -430,7 +421,6 @@ class RealtimeVoiceProcessor:
 
             # Iterate over a copy of items to allow modification during iteration
             for user_id, buffer in list(self.audio_buffers[guild_id].items()):
-                # 現在発話中、または発話は停止したがバッファにデータが残っている場合
                 # `get_audio_chunk` が内部で適切なサイズのチャンクを管理
                 chunk = buffer.get_audio_chunk()
                 if chunk:
