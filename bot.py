@@ -212,7 +212,7 @@ class RealtimeTranscriptionEngine:
                             language="ja",
                             beam_size=1,  # 最速化のためビームサイズを1に
                             vad_filter=True, # WhisperのVADフィルターを有効に維持
-                            no_speech_threshold=0.1, # ★★★ no_speech_thresholdを0.1に調整 ★★★
+                            no_speech_threshold=0.4, # ★★★ no_speech_thresholdを0.4に調整 ★★★
                             condition_on_previous_text=False  # 前のテキストに依存しない
                         )
                         
@@ -590,7 +590,7 @@ async def status(ctx):
     status_msg += f"🎤 チャンネル参加者: {channel_members}人\n"
     status_msg += f"⚡ 処理間隔: {REALTIME_CHUNK_DURATION_MS}ms\n"
     status_msg += f"🎯 VAD感度: {VAD_AGGRESSIVENESS}/3\n"
-    status_msg += f"🔊 無音閾値: {SILENCE_THRESHOLD_MS}ms\n"
+    status_msg += f"🔊 音声検出閾値: {SILENCE_THRESHOLD_MS}ms\n"
     
     # 現在バッファリングされている音声データの量を表示（デバッグ用）
     if ctx.guild.id in voice_processor.audio_buffers:
