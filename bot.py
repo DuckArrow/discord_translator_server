@@ -27,7 +27,7 @@ import webrtcvad
 
 # ★★★ 新しい設定 ★★★
 # リアルタイム性向上のための設定
-REALTIME_CHUNK_DURATION_MS = 1000  # 1000ms（1秒）
+REALTIME_CHUNK_DURATION_MS = 1200  # ★★★ 1000msから1200ms（1.2秒）に調整 ★★★
 VAD_AGGRESSIVENESS = 0  # VADの感度を調整 (0-3, 0が最も寛容)
 MIN_SPEECH_DURATION_MS = 300  # 最小発話時間（300ms）
 SILENCE_THRESHOLD_MS = 1000 # 無音時間がこれを超えると発話終了とみなす
@@ -212,7 +212,7 @@ class RealtimeTranscriptionEngine:
                             language="ja",
                             beam_size=1,  # 最速化のためビームサイズを1に
                             vad_filter=True, # WhisperのVADフィルターを有効に維持
-                            no_speech_threshold=0.4, # ★★★ no_speech_thresholdを0.4に調整 ★★★
+                            no_speech_threshold=0.8, # no_speech_thresholdを0.8に調整
                             condition_on_previous_text=False  # 前のテキストに依存しない
                         )
                         
