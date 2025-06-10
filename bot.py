@@ -13,6 +13,7 @@ import queue # スレッド間のデータ通信用
 from collections import deque # 効率的なバッファリング用
 from typing import Optional, Dict, Any, List
 import numpy as np # 音声リサンプリング用
+import shutil # ファイルコピー用
 
 # faster-whisperのインポート
 from faster_whisper import WhisperModel
@@ -27,7 +28,7 @@ import webrtcvad
 
 # ★★★ 新しい設定 ★★★
 # リアルタイム性向上のための設定
-REALTIME_CHUNK_DURATION_MS = 1200  # ★★★ 1000msから1200ms（1.2秒）に調整 ★★★
+REALTIME_CHUNK_DURATION_MS = 1200  # 1200ms（1.2秒）
 VAD_AGGRESSIVENESS = 0  # VADの感度を調整 (0-3, 0が最も寛容)
 MIN_SPEECH_DURATION_MS = 300  # 最小発話時間（300ms）
 SILENCE_THRESHOLD_MS = 1000 # 無音時間がこれを超えると発話終了とみなす
@@ -60,6 +61,11 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # 音声データ保存用のディレクトリを作成
 AUDIO_OUTPUT_DIR = "recorded_audio"
 os.makedirs(AUDIO_OUTPUT_DIR, exist_ok=True)
+
+# デバッグ用音声保存設定
+SAVE_DEBUG_AUDIO = False
+DEBUG_AUDIO_SAVE_DIR = os.path.join(AUDIO_OUTPUT_DIR, "debug_recordings")
+os.makedirs(DEBUG_AUDIO_SAVE_DIR, exist_ok=True) # Ensure directory exists
 
 # ギルドごとのボイス接続を管理
 connections: Dict[int, VoiceRecvClient] = {}
@@ -202,6 +208,14 @@ class RealtimeTranscriptionEngine:
                         wf.setframerate(WHISPER_SAMPLE_RATE)
                         wf.writeframes(audio_data)
                     
+                    # デバッグ用音声保存が有効な場合、コピーを保存
+                    global SAVE_DEBUG_AUDIO, DEBUG_AUDIO_SAVE_DIR
+                    if SAVE_DEBUG_AUDIO:
+                        debug_save_filename = f"user_{task['user_id']}_{int(time.time())}.wav"
+                        debug_save_path = os.path.join(DEBUG_AUDIO_SAVE_DIR, debug_save_filename)
+                        shutil.copy(temp_path, debug_save_path)
+                        print(f"DEBUG Worker: Saved debug audio to {debug_save_path}")
+
                     print(f"DEBUG Worker: Processing task for {task['username']}. Temp file: {temp_path}, Audio length: {len(audio_data)} bytes.")
                     
                     # Whisperで文字起こし
@@ -210,10 +224,10 @@ class RealtimeTranscriptionEngine:
                         segments, info = self.whisper_model.transcribe(
                             temp_path,
                             language="ja",
-                            beam_size=1,  # 最速化のためビームサイズを1に
+                            beam_size=5,  # ★★★ beam_sizeを5に再変更 ★★★
                             vad_filter=True, # WhisperのVADフィルターを有効に維持
-                            no_speech_threshold=0.8, # no_speech_thresholdを0.8に調整
-                            condition_on_previous_text=False  # 前のテキストに依存しない
+                            no_speech_threshold=0.5, # ★★★ no_speech_thresholdを0.5に調整 ★★★
+                            condition_on_previous_text=True  # ★★★ condition_on_previous_textをTrueに再変更 ★★★
                         )
                         
                         for segment in segments:
@@ -600,6 +614,14 @@ async def status(ctx):
                 status_msg += f"Buffer ({user.display_name}): {len(buffer.accumulated_audio)} bytes\n"
     
     await ctx.send(status_msg)
+
+@bot.command()
+async def toggle_debug_audio(ctx):
+    """デバッグ用音声保存の有効/無効を切り替えます。"""
+    global SAVE_DEBUG_AUDIO
+    SAVE_DEBUG_AUDIO = not SAVE_DEBUG_AUDIO
+    status_text = "有効" if SAVE_DEBUG_AUDIO else "無効"
+    await ctx.send(f"🔊 デバッグ用音声保存を**{status_text}**にしました。\n保存先: `{DEBUG_AUDIO_SAVE_DIR}`")
 
 
 @bot.event
