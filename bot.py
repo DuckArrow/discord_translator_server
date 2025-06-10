@@ -210,12 +210,10 @@ class RealtimeTranscriptionEngine:
                         segments, info = self.whisper_model.transcribe(
                             temp_path,
                             language="ja",
-                            beam_size=5,
-                            # ★★★ vad_filterをFalseに再変更 ★★★
-                            vad_filter=False, # 無音部分のフィルタリングを無効にする
-                            # ★★★ condition_on_previous_textをTrueに設定 ★★★
-                            condition_on_previous_text=True, # 前のテキストに依存する
-                            no_speech_threshold=0.3 # VAD無効化時に、より積極的に文字起こしを試みる
+                            beam_size=1,  # 最速化のためビームサイズを1に
+                            vad_filter=True, # WhisperのVADフィルターを有効に維持
+                            no_speech_threshold=0.1, # ★★★ no_speech_thresholdを0.1に調整 ★★★
+                            condition_on_previous_text=False  # 前のテキストに依存しない
                         )
                         
                         for segment in segments:
