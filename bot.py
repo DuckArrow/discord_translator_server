@@ -75,7 +75,7 @@ WHISPER_MODEL_SIZE = "small"
 WHISPER_DEVICE = "cpu"
 WHISPER_COMPUTE_TYPE = "int8"
 
-# ★★★ 抑制するフレーズのリストを定義 ★★★
+# 抑制するフレーズのリストを定義
 # 環境音などで誤認識されやすいフィラーワードや、出力したくないフレーズをここにリストアップします。
 HALLUCINATION_TEXTS = [
     "ご視聴ありがとうございました", "ご視聴ありがとうございました。",
@@ -240,13 +240,13 @@ class RealtimeTranscriptionEngine:
                             vad_filter=True, # WhisperのVADフィルターを有効に維持
                             no_speech_threshold=0.5, # 精度とリアルタイム性のバランス
                             condition_on_previous_text=True,  # 精度を重視するため文脈依存を有効
-                            # suppress_tokens は後処理フィルターに置き換えるため削除
+                            patience=0.0 # ★★★ patienceを0.0に設定 ★★★
                         )
                         
                         for segment in segments:
                             transcription += segment.text
                     
-                    # ★★★ 文字起こし結果をHALLUCINATION_TEXTSでフィルタリング ★★★
+                    # 文字起こし結果をHALLUCINATION_TEXTSでフィルタリング
                     stripped_transcription = transcription.strip()
                     if stripped_transcription and stripped_transcription not in HALLUCINATION_TEXTS:
                         self.result_queue.put({
