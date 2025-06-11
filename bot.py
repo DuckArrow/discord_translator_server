@@ -240,7 +240,7 @@ class RealtimeTranscriptionEngine:
                             vad_filter=True, # WhisperのVADフィルターを有効に維持
                             no_speech_threshold=0.5, # 精度とリアルタイム性のバランス
                             condition_on_previous_text=True,  # 精度を重視するため文脈依存を有効
-                            patience=0.0 # ★★★ patienceを0.0に設定 ★★★
+                            patience=0.5 # ★★★ patienceを0.5に再設定 ★★★
                         )
                         
                         for segment in segments:
